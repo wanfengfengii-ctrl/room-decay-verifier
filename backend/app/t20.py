@@ -22,6 +22,10 @@ DB_LOWER = -25.0
 DB_UPPER = -5.0
 BACKGROUND_TAIL_RATIO = 0.10
 
+# 衰减轨迹图最多展示的取样点数：超过后首尾必留、等距取样，
+# 仅用于可视化；斜率、R²、T20 始终用完整窗口计算。
+TRAIL_MAX_PLOT_POINTS = 200
+
 # 拟合优度阈值：R² >= 0.9000 视为衰减点离散程度可接受（稳定），
 # 低于阈值只提示复查，不参与合格判定。
 RSQUARED_STABLE_THRESHOLD = 0.9000
@@ -30,6 +34,38 @@ REASON_INSUFFICIENT_POINTS = (
     "衰减窗口 [-25, -5] dB 内有效采样点不足 30 个，无法进行最小二乘回归"
 )
 REASON_NON_NEGATIVE_SLOPE = "衰减曲线斜率非负，不符合混响衰减特征"
+
+
+@dataclass(frozen=True)
+class WindowPoint:
+    """[-25, -5] dB 窗口内的一个取样点：峰值后的秒数与对应 dB 值。"""
+
+    time_seconds: float
+    db: float
+
+
+@dataclass(frozen=True)
+class FitLine:
+    """完整窗口（未取样）最小二乘回归线在窗口两端 t 处的端点。"""
+
+    t_start: float
+    db_start: float
+    t_end: float
+    db_end: float
+
+
+@dataclass(frozen=True)
+class DecayTrail:
+    """单间成功结论附带的衰减轨迹（仅可视化，不参与任何计算口径）。
+
+    sampled_points 为展示用取样点（首尾必留、等距索引，最多
+    TRAIL_MAX_PLOT_POINTS 个）；total_points 是完整窗口取点数；
+    fit_line 是以完整窗口回归的斜率与截距在窗口两端 t 处的取值。
+    """
+
+    total_points: int
+    sampled_points: list[WindowPoint]
+    fit_line: FitLine
 
 
 @dataclass(frozen=True)
@@ -46,6 +82,7 @@ class T20Result:
     passed: Optional[bool] = None
     r_squared: Optional[float] = None
     fit_quality: Optional[str] = None
+    trail: Optional[DecayTrail] = None
 
 
 def _first_max_index(values: list[float]) -> int:
@@ -91,6 +128,26 @@ def classify_fit_quality(r_squared: float) -> str:
     标签只提示工程师是否值得现场复查，绝不参与 T20 合格判定。
     """
     return "stable" if r_squared >= RSQUARED_STABLE_THRESHOLD else "needs_review"
+
+
+def sample_trail_indices(total: int, limit: int = TRAIL_MAX_PLOT_POINTS) -> list[int]:
+    """展示用取样索引：不超过 limit 时原样返回；超过时首尾必留、等距取样。
+
+    等距口径：在 [0, total-1] 上取 limit 个等距位置并四舍五入到最近索引。
+    total > limit 时相邻位置间距 (total-1)/(limit-1) 恒大于 1，
+    故四舍五入后索引必不重复；seen 仅作防御性去重，不改变等距结果。
+    """
+    if total <= limit:
+        return list(range(total))
+    indices: list[int] = []
+    seen: set[int] = set()
+    for k in range(limit):
+        idx = round(k * (total - 1) / (limit - 1))
+        if idx not in seen:
+            seen.add(idx)
+            indices.append(idx)
+    # 等距四舍五入序列天然升序且首项为 0、末项为 total-1
+    return indices
 
 
 def evaluate_t20(
@@ -155,6 +212,23 @@ def evaluate_t20(
     r_squared = _r_squared(xs, ys, slope, intercept)
     fit_quality = classify_fit_quality(r_squared)
     t20 = -20.0 / slope
+
+    # 衰减轨迹仅用于现场可视化：展示点等距取样（斜率/R²/T20 仍用完整窗口），
+    # 拟合线端点取完整回归线在窗口首末 t 处的值。
+    sampled = [
+        WindowPoint(time_seconds=xs[i], db=ys[i])
+        for i in sample_trail_indices(len(window))
+    ]
+    trail = DecayTrail(
+        total_points=len(window),
+        sampled_points=sampled,
+        fit_line=FitLine(
+            t_start=xs[0],
+            db_start=intercept + slope * xs[0],
+            t_end=xs[-1],
+            db_end=intercept + slope * xs[-1],
+        ),
+    )
     return T20Result(
         accepted=True,
         t20_seconds=t20,
@@ -166,4 +240,5 @@ def evaluate_t20(
         passed=t20 <= limit_seconds,
         r_squared=r_squared,
         fit_quality=fit_quality,
+        trail=trail,
     )

@@ -202,6 +202,7 @@ def test_success_payload_carries_fit_evidence():
         "passed",
         "r_squared",
         "fit_quality",
+        "decay_trail",
     }
     assert isinstance(body["r_squared"], float)
     assert body["fit_quality"] in {"stable", "needs_review"}

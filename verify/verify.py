@@ -103,6 +103,50 @@ def oracle_t20(dt_ms: int, pressure: list[float]) -> tuple[float, float, int, fl
     return -20.0 / slope, slope, len(window), r_squared
 
 
+TRAIL_MAX_PLOT_POINTS = 200
+
+
+def oracle_decay_trail(dt_ms: int, pressure: list[float]) -> dict:
+    """独立复算衰减轨迹所需的完整窗口与完整回归线，不调用后端算法模块。"""
+    n = len(pressure)
+    tail = math.ceil(n * 0.10)
+    background = sum(pressure[n - tail:]) / tail
+    peak = max(range(n), key=lambda i: pressure[i])
+    corrected = [
+        ((i - peak) * dt_ms / 1000.0, pressure[i] - background)
+        for i in range(peak, n)
+        if pressure[i] - background > 0.0
+    ]
+    reference = max(v for _, v in corrected)
+    window = [
+        (t, 20.0 * math.log10(v / reference))
+        for t, v in corrected
+    ]
+    window = [(t, db) for t, db in window if -25.0 <= db <= -5.0]
+    m = len(window)
+    xs = [t for t, _ in window]
+    ys = [db for _, db in window]
+    x_bar, y_bar = sum(xs) / m, sum(ys) / m
+    sxx = sum((x - x_bar) ** 2 for x in xs)
+    sxy = sum((x - x_bar) * (y - y_bar) for x, y in window)
+    slope = sxy / sxx
+    intercept = y_bar - slope * x_bar
+    # 与后端 sample_trail_indices 同一口径的预期等距索引
+    if m <= TRAIL_MAX_PLOT_POINTS:
+        indices = list(range(m))
+    else:
+        indices = [
+            round(k * (m - 1) / (TRAIL_MAX_PLOT_POINTS - 1))
+            for k in range(TRAIL_MAX_PLOT_POINTS)
+        ]
+    return {
+        "window": window,
+        "slope": slope,
+        "intercept": intercept,
+        "indices": indices,
+    }
+
+
 def check(name: str, condition: bool, detail: str = "") -> None:
     if not condition:
         raise SystemExit(f"[verify] 失败: {name} {detail}")
@@ -137,6 +181,117 @@ def main() -> None:
     check("理想衰减 R² 为 1.0000", data["r_squared"] == 1.0, body)
     check("四位小数展示为 1.0000", f"{data['r_squared']:.4f}" == "1.0000", body)
     check("理想衰减拟合质量为 stable", data["fit_quality"] == "stable", body)
+
+    # 1b. 衰减轨迹：同一次计算返回窗口取样点与完整回归线端点
+    oracle_trail = oracle_decay_trail(1, payload["pressure"])
+    trail = data.get("decay_trail")
+    check("成功响应携带 decay_trail", isinstance(trail, dict), body)
+    window = oracle_trail["window"]
+    check(
+        "完整取点数与 oracle 一致且等于 points_used",
+        trail["total_points"] == len(window) == data["points_used"],
+        json.dumps(trail, ensure_ascii=False)[:200],
+    )
+    # 理想衰减窗口约 500 点，必然超过 200，用于验证等距取样
+    check("该样本窗口超过 200 点", len(window) > TRAIL_MAX_PLOT_POINTS, str(len(window)))
+    sampled = trail["sampled_points"]
+    check("展示点恰好 200 个", len(sampled) == TRAIL_MAX_PLOT_POINTS, str(len(sampled)))
+    expected_indices = oracle_trail["indices"]
+    check(
+        "取样索引等距、不重复、首尾必留",
+        expected_indices[0] == 0
+        and expected_indices[-1] == len(window) - 1
+        and len(set(expected_indices)) == len(expected_indices) == TRAIL_MAX_PLOT_POINTS,
+        str(expected_indices[:5]),
+    )
+    for point, idx in zip(sampled, expected_indices):
+        t, db = window[idx]
+        # 时间的浮点路径（先除后乘 vs 先乘后除）可能有 1 ULP 差异，按容差比对
+        if (
+            set(point.keys()) != {"time_seconds", "db"}
+            or abs(point["time_seconds"] - t) > 1e-12
+            or abs(point["db"] - db) > 1e-12
+        ):
+            check(
+                f"取样点 {idx} 与完整窗口一致",
+                False,
+                f"got {point} expect t={t!r} db={db!r}",
+            )
+    check("取样点全部与完整窗口预期索引一致", True)
+    check(
+        "取样首点为完整窗口首点",
+        abs(sampled[0]["time_seconds"] - window[0][0]) < 1e-12
+        and abs(sampled[0]["db"] - window[0][1]) < 1e-12,
+    )
+    check(
+        "取样末点为完整窗口末点",
+        abs(sampled[-1]["time_seconds"] - window[-1][0]) < 1e-12
+        and abs(sampled[-1]["db"] - window[-1][1]) < 1e-12,
+    )
+
+    # 拟合线端点必须来自完整（未取样）回归线：t 为窗口首末 t，
+    # db 为 intercept + slope*t，而不是取样折线的连接值
+    xs = [t for t, _ in window]
+    slope_o, intercept_o = oracle_trail["slope"], oracle_trail["intercept"]
+    line = trail["fit_line"]
+    check(
+        "fit_line 结构完整",
+        set(line.keys()) == {"t_start", "db_start", "t_end", "db_end"},
+        str(line),
+    )
+    check(
+        "端点 t 为窗口首末时间",
+        abs(line["t_start"] - xs[0]) < 1e-12 and abs(line["t_end"] - xs[-1]) < 1e-12,
+        str(line),
+    )
+    check(
+        "端点 dB 来自完整回归线",
+        abs(line["db_start"] - (intercept_o + slope_o * xs[0])) < 1e-9
+        and abs(line["db_end"] - (intercept_o + slope_o * xs[-1])) < 1e-9
+        and abs(data["slope"] - slope_o) < 1e-9,
+        str(line),
+    )
+    # 线端点与对应窗口点不应被当作同一个展示点（取样只影响 sampled_points）
+    check(
+        "线端点斜率与完整窗口斜率一致",
+        abs((line["db_end"] - line["db_start"]) / (line["t_end"] - line["t_start"]) - slope_o)
+        < 1e-9,
+        str(line),
+    )
+
+    # 1c. 不足 200 点时完整窗口点全部展示，不做取样
+    slow_payload = {
+        "sample_interval_ms": 100,
+        "pressure": make_decay(15.0, dt_ms=100, n=2000),
+        "limit_seconds": 5.0,
+    }
+    slow_oracle = oracle_decay_trail(100, slow_payload["pressure"])
+    slow_window = slow_oracle["window"]
+    check("慢衰减窗口点数落在 [30, 200]", 30 <= len(slow_window) <= TRAIL_MAX_PLOT_POINTS,
+          str(len(slow_window)))
+    slow_status, slow_body = http("POST", f"{API_URL}/api/evaluate", slow_payload)
+    slow_data = json.loads(slow_body)
+    slow_trail = slow_data["decay_trail"]
+    check(
+        "不足 200 点时取样点与完整窗口一一对应",
+        slow_status == 200
+        and slow_trail["total_points"] == len(slow_window) == slow_data["points_used"]
+        and len(slow_trail["sampled_points"]) == len(slow_window)
+        and all(
+            abs(p["time_seconds"] - t) < 1e-12 and abs(p["db"] - db) < 1e-12
+            for p, (t, db) in zip(slow_trail["sampled_points"], slow_window)
+        ),
+        f"shown={len(slow_trail['sampled_points'])} total={len(slow_window)}",
+    )
+    slow_line = slow_trail["fit_line"]
+    check(
+        "慢衰减拟合线端点同样来自完整回归线",
+        abs(slow_line["db_start"] - (slow_oracle["intercept"] + slow_oracle["slope"] * slow_window[0][0]))
+        < 1e-9
+        and abs(slow_line["db_end"] - (slow_oracle["intercept"] + slow_oracle["slope"] * slow_window[-1][0]))
+        < 1e-9,
+        str(slow_line),
+    )
 
     # 2. 相等算合格（未舍入值比较）
     status, body = http(
@@ -241,12 +396,17 @@ def main() -> None:
     )
 
     # 5. 非法输入返回 422
-    status, _ = http(
+    status, invalid_body = http(
         "POST",
         f"{API_URL}/api/evaluate",
         {"sample_interval_ms": 1, "pressure": [1.0, 2.0], "limit_seconds": 1.0},
     )
     check("过短采样返回 422", status == 422, f"got {status}")
+    check(
+        "字段错误响应不含任何轨迹图形数据",
+        "decay_trail" not in invalid_body and "sampled_points" not in invalid_body,
+        invalid_body[:200],
+    )
 
     # 5b. 类型错误（字符串压力 / 布尔间隔）必须直接拒绝，不得强转
     for name, bad_payload in [
@@ -407,8 +567,10 @@ def main() -> None:
     )
     # 字段错误项不携带任何拟合证据
     check(
-        "字段错误项不携带拟合证据",
-        "r_squared" not in batch["items"][3] and "fit_quality" not in batch["items"][3],
+        "字段错误项不携带拟合证据与衰减轨迹",
+        "r_squared" not in batch["items"][3]
+        and "fit_quality" not in batch["items"][3]
+        and "decay_trail" not in batch["items"][3],
         json.dumps(batch["items"][3], ensure_ascii=False),
     )
 
@@ -712,6 +874,12 @@ def main() -> None:
         "经 Web 反代复核结论一致",
         status == 200 and abs(data["t20_seconds"] - exp_t20) < 1e-9,
         body,
+    )
+    check(
+        "经 Web 反代衰减轨迹与直连一致",
+        data.get("decay_trail") == trail
+        and data["decay_trail"]["total_points"] == exp_points,
+        body[:200],
     )
 
     log("VERIFY OK：全部验收项通过")

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import math
 from typing import Optional
@@ -19,13 +20,14 @@ from .schemas import (
     BatchItemRejected,
     BatchItemSuccess,
     BatchSummary,
+    DecayTrailModel,
     EvaluateRejected,
     EvaluateRequest,
     EvaluateResponse,
     EvaluateSuccess,
     is_utf8_encodable,
 )
-from .t20 import evaluate_t20
+from .t20 import T20Result, evaluate_t20
 
 app = FastAPI(title="T20 混响复核台", version="1.2.0")
 
@@ -84,6 +86,16 @@ def health() -> dict:
     return {"status": "up"}
 
 
+def _trail_payload(result: T20Result) -> DecayTrailModel:
+    """把计算核心的衰减轨迹转成响应模型；仅成功结论携带。"""
+    assert result.trail is not None
+    return DecayTrailModel(
+        total_points=result.trail.total_points,
+        sampled_points=[dataclasses.asdict(p) for p in result.trail.sampled_points],
+        fit_line=dataclasses.asdict(result.trail.fit_line),
+    )
+
+
 def _run_evaluation(
     sample_interval_ms: int,
     pressure: list[float],
@@ -111,6 +123,7 @@ def _run_evaluation(
         passed=result.passed,
         r_squared=result.r_squared,
         fit_quality=result.fit_quality,
+        decay_trail=_trail_payload(result),
     )
 
 

@@ -60,6 +60,34 @@ class EvaluateRequest(BaseModel):
         return values
 
 
+class WindowPointModel(BaseModel):
+    """轨迹取样点：峰值后的秒数与 [-25, -5] dB 窗口内的 dB 值。"""
+
+    time_seconds: float
+    db: float
+
+
+class FitLineModel(BaseModel):
+    """完整窗口回归线在窗口首末 t 处的两个端点（非取样近似）。"""
+
+    t_start: float
+    db_start: float
+    t_end: float
+    db_end: float
+
+
+class DecayTrailModel(BaseModel):
+    """衰减轨迹：展示用取样点、完整取点数与回归线端点。
+
+    斜率、R²、T20 一律使用 total_points 对应的完整窗口计算，
+    sampled_points 仅用于前端画图，最多 200 个且首尾必留。
+    """
+
+    total_points: int
+    sampled_points: list[WindowPointModel]
+    fit_line: FitLineModel
+
+
 class EvaluateSuccess(BaseModel):
     status: Literal["ok"] = "ok"
     t20_seconds: float
@@ -72,6 +100,8 @@ class EvaluateSuccess(BaseModel):
     # 拟合优度证据：R² 已钳制到 [0, 1]；fit_quality 仅提示是否复查，不参与合格判定
     r_squared: float
     fit_quality: Literal["stable", "needs_review"]
+    # 衰减轨迹仅可视化判定依据；旧客户端忽略该字段即可，契约向后兼容
+    decay_trail: DecayTrailModel
 
 
 class EvaluateRejected(BaseModel):
@@ -122,6 +152,7 @@ class BatchItemSuccess(BaseModel):
     passed: bool
     r_squared: float
     fit_quality: Literal["stable", "needs_review"]
+    decay_trail: DecayTrailModel
 
 
 class BatchItemRejected(BaseModel):

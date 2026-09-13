@@ -1,5 +1,6 @@
 import { useReducer, useRef, useState } from 'react';
 import { evaluateSample } from './api.js';
+import DecayTrail from './DecayTrail.jsx';
 import FitQuality from './FitQuality.jsx';
 import { formatSeconds, formatSlope } from './format.js';
 import { EXAMPLE_JSON } from './sample.js';
@@ -108,6 +109,7 @@ export default function SingleReview() {
           <p className="hint fit-note">
             拟合质量按回归 R² 提示是否值得现场复查（R² ≥ 0.9000 为稳定），不参与、也不改变上面的合格判定。
           </p>
+          <DecayTrail result={state.result} />
         </section>
       )}
 

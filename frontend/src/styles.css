@@ -173,6 +173,105 @@ dd {
   color: #dc2626;
 }
 
+/* ---------- 衰减轨迹 ---------- */
+
+.decay-trail {
+  margin-top: 16px;
+  border-top: 1px dashed #dbe3ec;
+  padding-top: 14px;
+}
+
+.trail-toggle {
+  padding: 6px 16px;
+  font-size: 13px;
+}
+
+.trail-placeholder {
+  margin-left: 12px;
+  color: #6b7280;
+  font-size: 13px;
+}
+
+.trail-count {
+  margin: 12px 0 8px;
+  color: #374151;
+  font-size: 13px;
+}
+
+.trail-count strong {
+  font-variant-numeric: tabular-nums;
+}
+
+.trail-chart {
+  width: 100%;
+  max-width: 640px;
+  height: auto;
+  display: block;
+}
+
+.trail-plot-bg {
+  fill: #fbfdff;
+  stroke: #c9d2dc;
+  stroke-width: 1;
+}
+
+.trail-grid {
+  stroke: #e3e9f0;
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+}
+
+.trail-axis {
+  stroke: #9aa6b2;
+  stroke-width: 1;
+}
+
+.trail-axis-text {
+  fill: #6b7280;
+  font-size: 11px;
+}
+
+.trail-axis-title {
+  fill: #4b5563;
+  font-size: 12px;
+}
+
+.trail-dot {
+  fill: #2563eb;
+  fill-opacity: 0.55;
+}
+
+.trail-fitline {
+  stroke: #dc2626;
+  stroke-width: 1.8;
+  fill: none;
+}
+
+.trail-legend {
+  margin: 8px 0 0;
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.legend-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #2563eb;
+  opacity: 0.55;
+}
+
+.legend-line {
+  display: inline-block;
+  width: 18px;
+  border-top: 2px solid #dc2626;
+  margin-left: 10px;
+}
+
 /* ---------- 模式切换 ---------- */
 
 .mode-switch {
