@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { formatBatchRoomId, formatSeconds, formatSlope, formatT20 } from '../format.js';
+import {
+  FIT_QUALITY_THRESHOLD,
+  describeFitQuality,
+  formatBatchRoomId,
+  formatRSquared,
+  formatSeconds,
+  formatSlope,
+  formatT20,
+} from '../format.js';
 
 describe('formatT20', () => {
   it('保留三位小数', () => {
@@ -25,6 +33,80 @@ describe('formatSlope', () => {
   it('保留六位小数', () => {
     expect(formatSlope(-33.3333333)).toBe('-33.333333');
     expect(formatSlope(-40)).toBe('-40.000000');
+  });
+});
+
+describe('formatRSquared', () => {
+  it('固定四位小数', () => {
+    expect(formatRSquared(1)).toBe('1.0000');
+    expect(formatRSquared(0.90004)).toBe('0.9000');
+    expect(formatRSquared(0.869709)).toBe('0.8697');
+  });
+
+  it('第 5 位四舍五入可能越过展示阈值，分类仍以未舍入值为准', () => {
+    // 0.89996 未舍入低于 0.9（需复查），但四位小数显示 0.9000
+    expect(formatRSquared(0.89996)).toBe('0.9000');
+  });
+
+  it('阈值恰好 0.9000 展示为 0.9000', () => {
+    expect(formatRSquared(FIT_QUALITY_THRESHOLD)).toBe('0.9000');
+  });
+
+  it('缺字段或非有限数返回 null（交给调用方显示占位文案）', () => {
+    expect(formatRSquared(undefined)).toBeNull();
+    expect(formatRSquared(null)).toBeNull();
+    expect(formatRSquared(NaN)).toBeNull();
+    expect(formatRSquared(Infinity)).toBeNull();
+    expect(formatRSquared('0.9')).toBeNull();
+  });
+});
+
+describe('describeFitQuality', () => {
+  it('R² 高于等于阈值标记稳定，四位小数与标签同时给出', () => {
+    expect(describeFitQuality({ r_squared: 0.936359, fit_quality: 'stable' })).toEqual({
+      available: true,
+      r2Text: '0.9364',
+      review: false,
+      label: '稳定',
+    });
+    const boundary = describeFitQuality({ r_squared: 0.9, fit_quality: 'stable' });
+    expect(boundary.label).toBe('稳定');
+    expect(boundary.r2Text).toBe('0.9000');
+  });
+
+  it('R² 低于阈值标记需复查', () => {
+    expect(describeFitQuality({ r_squared: 0.899731, fit_quality: 'needs_review' })).toEqual({
+      available: true,
+      r2Text: '0.8997',
+      review: true,
+      label: '需复查',
+    });
+  });
+
+  it('分类以未舍入 R² 为准：显示 0.9000 但原值低于阈值仍提示复查', () => {
+    const fit = describeFitQuality({ r_squared: 0.89996, fit_quality: 'needs_review' });
+    expect(fit.r2Text).toBe('0.9000');
+    expect(fit.review).toBe(true);
+    expect(fit.label).toBe('需复查');
+  });
+
+  it('标签以服务端 fit_quality 为准，缺半截字段时退回同一阈值口径', () => {
+    expect(describeFitQuality({ r_squared: 0.95 }).review).toBe(false);
+    expect(describeFitQuality({ r_squared: 0.8 }).review).toBe(true);
+    // 服务端标签与数值冲突时不自作主张：以服务端 fit_quality 为准
+    expect(describeFitQuality({ r_squared: 0.95, fit_quality: 'needs_review' }).review).toBe(true);
+  });
+
+  it('旧服务不返回新字段时显示暂无拟合质量，且不误判为需复查', () => {
+    expect(describeFitQuality({})).toEqual({
+      available: false,
+      r2Text: null,
+      review: null,
+      label: '暂无拟合质量',
+    });
+    expect(describeFitQuality(undefined).label).toBe('暂无拟合质量');
+    expect(describeFitQuality(null).available).toBe(false);
+    expect(describeFitQuality({ fit_quality: 'stable' }).available).toBe(false);
   });
 });
 

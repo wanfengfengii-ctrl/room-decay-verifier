@@ -341,4 +341,8 @@ def test_single_endpoint_payload_shape_unchanged():
         "peak_index",
         "limit_seconds",
         "passed",
+        "r_squared",
+        "fit_quality",
     }
+    assert 0.0 <= body["r_squared"] <= 1.0
+    assert body["fit_quality"] in {"stable", "needs_review"}

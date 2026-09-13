@@ -117,6 +117,54 @@ dd {
   font-weight: 600;
 }
 
+/* ---------- 拟合优度（R²）---------- */
+
+.slope-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.fit-quality {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.fit-quality .fit-r2 {
+  font-variant-numeric: tabular-nums;
+}
+
+.fit-stable {
+  background: #dcfce7;
+  color: #15803d;
+}
+
+.fit-review {
+  background: #fef3c7;
+  color: #b45309;
+}
+
+.fit-quality-unknown {
+  background: #eef1f5;
+  color: #6b7280;
+}
+
+.batch-table .fit-cell {
+  white-space: nowrap;
+}
+
+.fit-note {
+  margin: 14px 0 0;
+  font-size: 13px;
+}
+
 .pass {
   color: #16a34a;
 }

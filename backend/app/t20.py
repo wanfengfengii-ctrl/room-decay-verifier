@@ -6,7 +6,9 @@
 3. 以最大校正量为基准，计算 20 * log10(校正量 / 基准量) dB；
 4. 选取落在闭区间 [-25, -5] dB 的点，以峰值后的秒数为横轴做普通最小二乘；
 5. 有效点不足 30 个或斜率不为负即拒绝；
-6. T20 = -20 / 斜率，使用未舍入值与上限比较，相等算合格。
+6. T20 = -20 / 斜率，使用未舍入值与上限比较，相等算合格；
+7. 用同一组 [-25, -5] dB 取点与已求得的回归线计算决定系数 R²，
+   残差比值因浮点误差略越过 [0, 1] 时先钳制到闭区间再分类。
 """
 
 from __future__ import annotations
@@ -19,6 +21,10 @@ MIN_WINDOW_POINTS = 30
 DB_LOWER = -25.0
 DB_UPPER = -5.0
 BACKGROUND_TAIL_RATIO = 0.10
+
+# 拟合优度阈值：R² >= 0.9000 视为衰减点离散程度可接受（稳定），
+# 低于阈值只提示复查，不参与合格判定。
+RSQUARED_STABLE_THRESHOLD = 0.9000
 
 REASON_INSUFFICIENT_POINTS = (
     "衰减窗口 [-25, -5] dB 内有效采样点不足 30 个，无法进行最小二乘回归"
@@ -38,6 +44,8 @@ class T20Result:
     background: float = 0.0
     peak_index: int = 0
     passed: Optional[bool] = None
+    r_squared: Optional[float] = None
+    fit_quality: Optional[str] = None
 
 
 def _first_max_index(values: list[float]) -> int:
@@ -49,14 +57,40 @@ def _first_max_index(values: list[float]) -> int:
     return best
 
 
-def _ols_slope(xs: list[float], ys: list[float]) -> float:
-    """普通最小二乘斜率。xs 互不相同，分母恒正。"""
+def _ols_slope_intercept(xs: list[float], ys: list[float]) -> tuple[float, float]:
+    """普通最小二乘斜率与截距。xs 互不相同，斜率分母恒正。"""
     n = len(xs)
     x_bar = sum(xs) / n
     y_bar = sum(ys) / n
     sxx = sum((x - x_bar) ** 2 for x in xs)
     sxy = sum((x - x_bar) * (y - y_bar) for x, y in zip(xs, ys))
-    return sxy / sxx
+    slope = sxy / sxx
+    return slope, y_bar - slope * x_bar
+
+
+def _r_squared(xs: list[float], ys: list[float], slope: float, intercept: float) -> float:
+    """决定系数：1 - 残差平方和 / 总平方和，复用既有取点与已求得的回归线。
+
+    理论上 R² ∈ [0, 1]；浮点误差可能使 1 - SSE/SST 略越过 0 或 1，
+    先钳制到闭区间，阈值分类只面对合法取值。
+    """
+    y_bar = sum(ys) / len(ys)
+    ss_res = sum((y - (intercept + slope * x)) ** 2 for x, y in zip(xs, ys))
+    ss_tot = sum((y - y_bar) ** 2 for y in ys)
+    return _clamp_unit_interval(1.0 - ss_res / ss_tot)
+
+
+def _clamp_unit_interval(value: float) -> float:
+    """把决定系数钳制到闭区间 [0, 1]，挡掉残差比值的浮点越界。"""
+    return min(1.0, max(0.0, value))
+
+
+def classify_fit_quality(r_squared: float) -> str:
+    """R² >= 0.9000 为 stable，否则 needs_review；相等归稳定侧。
+
+    标签只提示工程师是否值得现场复查，绝不参与 T20 合格判定。
+    """
+    return "stable" if r_squared >= RSQUARED_STABLE_THRESHOLD else "needs_review"
 
 
 def evaluate_t20(
@@ -106,7 +140,7 @@ def evaluate_t20(
 
     xs = [t for t, _ in window]
     ys = [db for _, db in window]
-    slope = _ols_slope(xs, ys)
+    slope, intercept = _ols_slope_intercept(xs, ys)
 
     if slope >= 0.0:
         return T20Result(
@@ -117,6 +151,9 @@ def evaluate_t20(
             peak_index=peak_index,
         )
 
+    # 拟合优度只复用既有取点与同一条回归线，不改变 T20 与合格口径
+    r_squared = _r_squared(xs, ys, slope, intercept)
+    fit_quality = classify_fit_quality(r_squared)
     t20 = -20.0 / slope
     return T20Result(
         accepted=True,
@@ -127,4 +164,6 @@ def evaluate_t20(
         peak_index=peak_index,
         # 未舍入值与上限比较，相等算合格
         passed=t20 <= limit_seconds,
+        r_squared=r_squared,
+        fit_quality=fit_quality,
     )

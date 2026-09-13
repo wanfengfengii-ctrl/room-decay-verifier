@@ -1,6 +1,7 @@
 import { useReducer, useRef, useState } from 'react';
 import { evaluateBatch } from './api.js';
 import { COMMON_LIMIT_MAX, COMMON_LIMIT_MESSAGE, COMMON_LIMIT_MIN, parseCommonLimitInput, withCommonLimit } from './commonLimit.js';
+import FitQuality from './FitQuality.jsx';
 import { formatBatchRoomId, formatSeconds, formatSlope } from './format.js';
 import { BATCH_EXAMPLE_JSON } from './sample.js';
 import { batchReducer, initialBatchState } from './batchState.js';
@@ -18,6 +19,14 @@ function RowDetail({ item }) {
         <td data-testid="row-t20">{formatSeconds(item.t20_seconds)}</td>
         <td data-testid="row-points">{item.points_used}</td>
         <td data-testid="row-slope">{formatSlope(item.slope)}</td>
+        <td className="fit-cell">
+          <FitQuality
+            result={item}
+            testId="row-fit"
+            r2TestId="row-fit-r2"
+            labelTestId="row-fit-label"
+          />
+        </td>
         <td data-testid="row-limit">{formatSeconds(item.limit_seconds)}</td>
         <td data-testid="row-verdict" className={item.passed ? 'pass' : 'fail'}>
           {item.passed ? '合格' : '不合格'}
@@ -33,6 +42,7 @@ function RowDetail({ item }) {
         <td>—</td>
         <td>—</td>
         <td>—</td>
+        <td>—</td>
         <td data-testid="row-verdict">不计入</td>
         <td className="detail" data-testid="row-reason">
           {item.reason}
@@ -42,6 +52,7 @@ function RowDetail({ item }) {
   }
   return (
     <>
+      <td>—</td>
       <td>—</td>
       <td>—</td>
       <td>—</td>
@@ -165,7 +176,8 @@ export default function BatchReview() {
         </div>
         <p className="hint">
           每批 1 至 20 个房间；每项需含 room_id 及 sample_interval_ms / pressure / limit_seconds。
-          启用统一限值后各项可省略 limit_seconds，结果表「上限」列逐行显示实际采用的限值。
+          启用统一限值后各项可省略 limit_seconds，结果表「上限」列逐行显示实际采用的限值；
+          「拟合质量」列在斜率旁给出四位小数 R² 与稳定/需复查提示，仅用于判断是否值得现场复查，不影响合格判定。
         </p>
       </form>
 
@@ -190,6 +202,7 @@ export default function BatchReview() {
                 <th>T20</th>
                 <th>取点数</th>
                 <th>斜率 (dB/s)</th>
+                <th>拟合质量</th>
                 <th>上限</th>
                 <th>判定</th>
                 <th>说明</th>

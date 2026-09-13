@@ -87,6 +87,8 @@ def _run_evaluation(
         peak_index=result.peak_index,
         limit_seconds=limit_seconds,
         passed=result.passed,
+        r_squared=result.r_squared,
+        fit_quality=result.fit_quality,
     )
 
 

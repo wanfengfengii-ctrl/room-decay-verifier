@@ -54,8 +54,24 @@ def make_decay(t60: float, dt_ms: int = 1, n: int = 5000, offset: float = 0.25) 
     ]
 
 
-def oracle_t20(dt_ms: int, pressure: list[float]) -> tuple[float, float, int]:
-    """按复核口径独立计算 (t20, slope, points)。"""
+def make_wobbled_decay(
+    amplitude: float, period: int = 100, t60: float = 1.5, n: int = 5000
+) -> list[float]:
+    """完全指数衰减乘确定性正弦扰动：R² 由扰动幅度确定，可独立复算。
+
+    p_i = 1000·10^(-3t/T60)·(1 + a·sin(2πi/P)) + 0.25，幅度 < 1 保证声压恒正。
+    """
+    return [
+        1000.0
+        * 10.0 ** (-3.0 * (i / 1000.0) / t60)
+        * (1.0 + amplitude * math.sin(2.0 * math.pi * i / period))
+        + 0.25
+        for i in range(n)
+    ]
+
+
+def oracle_t20(dt_ms: int, pressure: list[float]) -> tuple[float, float, int, float]:
+    """按复核口径独立计算 (t20, slope, points, r_squared)。"""
     n = len(pressure)
     tail = math.ceil(n * 0.10)
     background = sum(pressure[n - tail:]) / tail
@@ -76,11 +92,15 @@ def oracle_t20(dt_ms: int, pressure: list[float]) -> tuple[float, float, int]:
     ys = [db for _, db in window]
     x_bar = sum(xs) / len(xs)
     y_bar = sum(ys) / len(ys)
-    slope = sum((x - x_bar) * (y - y_bar) for x, y in window) / sum(
-        (x - x_bar) ** 2 for x in xs
-    )
+    sxx = sum((x - x_bar) ** 2 for x in xs)
+    sxy = sum((x - x_bar) * (y - y_bar) for x, y in window)
+    slope = sxy / sxx
+    intercept = y_bar - slope * x_bar
     assert slope < 0.0, "oracle 样本斜率应为负"
-    return -20.0 / slope, slope, len(window)
+    ss_res = sum((y - (intercept + slope * x)) ** 2 for x, y in window)
+    ss_tot = sum((y - y_bar) ** 2 for y in ys)
+    r_squared = min(1.0, max(0.0, 1.0 - ss_res / ss_tot))
+    return -20.0 / slope, slope, len(window), r_squared
 
 
 def check(name: str, condition: bool, detail: str = "") -> None:
@@ -98,7 +118,7 @@ def main() -> None:
         "pressure": make_decay(1.5),
         "limit_seconds": 1.0,
     }
-    exp_t20, exp_slope, exp_points = oracle_t20(1, payload["pressure"])
+    exp_t20, exp_slope, exp_points, exp_r2 = oracle_t20(1, payload["pressure"])
     status, body = http("POST", f"{API_URL}/api/evaluate", payload)
     check("有效采样返回 200", status == 200, body)
     data = json.loads(body)
@@ -112,6 +132,11 @@ def main() -> None:
     check("斜率与 oracle 一致", abs(data["slope"] - exp_slope) < 1e-9)
     check("取点数与 oracle 一致", data["points_used"] == exp_points)
     check("上限内判定合格", data["passed"] is True)
+    # 理想指数衰减：R² 与独立 oracle 一致（=1.0），钳制后落在闭区间，标记稳定
+    check("R² 与独立 oracle 一致", abs(data["r_squared"] - exp_r2) < 1e-12, body)
+    check("理想衰减 R² 为 1.0000", data["r_squared"] == 1.0, body)
+    check("四位小数展示为 1.0000", f"{data['r_squared']:.4f}" == "1.0000", body)
+    check("理想衰减拟合质量为 stable", data["fit_quality"] == "stable", body)
 
     # 2. 相等算合格（未舍入值比较）
     status, body = http(
@@ -131,6 +156,73 @@ def main() -> None:
     _, body_a = http("POST", f"{API_URL}/api/evaluate", payload)
     _, body_b = http("POST", f"{API_URL}/api/evaluate", payload)
     check("同一采样两次响应完全一致", body_a == body_b)
+
+    # 3b. 拟合优度：确定扰动样本的 R² 与独立 oracle 一致，四舍五入与阈值两侧标签
+    fit_cases = [
+        # (扰动幅度, 期望未舍入 R² 近似, 四位小数, 期望 fit_quality)
+        (0.3087, 0.9003, "0.9003", "stable"),        # 阈值上方：稳定
+        (0.3095, 0.8997, "0.8997", "needs_review"),  # 阈值下方：需复查
+        (0.35, 0.8697, "0.8697", "needs_review"),    # 明显离散
+    ]
+    for amp, approx_r2, text_r2, quality in fit_cases:
+        wobbled = {
+            "sample_interval_ms": 1,
+            "pressure": make_wobbled_decay(amp),
+            "limit_seconds": 1.0,
+        }
+        _, _, _, oracle_r2 = oracle_t20(1, wobbled["pressure"])
+        status, wbody = http("POST", f"{API_URL}/api/evaluate", wobbled)
+        wdata = json.loads(wbody)
+        check(f"扰动 {amp} 返回 200 且为正常项", status == 200 and wdata["status"] == "ok", wbody)
+        check(
+            f"扰动 {amp} 的 R² 与独立 oracle 一致",
+            abs(wdata["r_squared"] - oracle_r2) < 1e-12,
+            f"got {wdata['r_squared']} expect {oracle_r2}",
+        )
+        check(
+            f"扰动 {amp} 的 R² 位于预期区间且四位小数为 {text_r2}",
+            abs(wdata["r_squared"] - approx_r2) < 5e-4
+            and f"{wdata['r_squared']:.4f}" == text_r2,
+            f"got {wdata['r_squared']!r}",
+        )
+        check(
+            f"扰动 {amp} 的拟合标签为 {quality}",
+            wdata["fit_quality"] == quality,
+            wbody,
+        )
+        check(
+            f"扰动 {amp} 的 R² 钳制在闭区间 [0, 1]",
+            0.0 <= wdata["r_squared"] <= 1.0,
+            wbody,
+        )
+
+    # 阈值两侧各一个真实采样（0.9003 稳定 / 0.8997 需复查），相等归稳定侧由单元测试保证。
+
+    # 需复查只是复查提示：R²≈0.8697 的采样 T20≈0.564 仍在 1.0 上限内 -> 合格
+    review_payload = {
+        "sample_interval_ms": 1,
+        "pressure": make_wobbled_decay(0.35),
+        "limit_seconds": 1.0,
+    }
+    review_data = json.loads(http("POST", f"{API_URL}/api/evaluate", review_payload)[1])
+    check(
+        "需复查不改变合格判定（离散但在上限内仍合格）",
+        review_data["fit_quality"] == "needs_review" and review_data["passed"] is True,
+        json.dumps(review_data, ensure_ascii=False),
+    )
+    # 同采样压低上限：稳定与否不随限值变化，只有 passed 改变
+    tight = json.loads(
+        http("POST", f"{API_URL}/api/evaluate", {**review_payload, "limit_seconds": 0.3})[1]
+    )
+    check(
+        "改变上限不改变拟合证据，只改变合格判定",
+        tight["r_squared"] == review_data["r_squared"]
+        and tight["fit_quality"] == review_data["fit_quality"]
+        and tight["passed"] is False,
+        json.dumps(tight, ensure_ascii=False),
+    )
+
+    # 3c. 两入口对同一采样的拟合证据逐字段一致（在下方混合批次中一并逐字段比对）
 
     # 4. 异常衰减只能看到拒绝原因
     bad = {
@@ -234,6 +326,77 @@ def main() -> None:
     check("批量首间取点数与 oracle 一致", first_ok["points_used"] == exp_points)
     check("批量首间合格", first_ok["passed"] is True)
     check("批量第二间超上限不合格", batch["items"][1]["passed"] is False)
+    # 正常项携带拟合证据：理想衰减 R²=1.0000 且 stable；逐字段比对已含这两个新字段
+    check(
+        "批量正常项携带 R² 与拟合标签",
+        first_ok["r_squared"] == 1.0 and first_ok["fit_quality"] == "stable",
+        json.dumps(first_ok, ensure_ascii=False),
+    )
+
+    # 3c. 两入口对同一扰动采样的拟合证据一致：稳定 / 需复查各一间，均合格，顺序不变
+    fit_rooms = [
+        {
+            "room_id": "FIT-STABLE",
+            "sample_interval_ms": 1,
+            "pressure": make_wobbled_decay(0.3087),
+            "limit_seconds": 1.0,
+        },
+        {
+            "room_id": "FIT-REVIEW",
+            "sample_interval_ms": 1,
+            "pressure": make_wobbled_decay(0.35),
+            "limit_seconds": 1.0,
+        },
+    ]
+    fit_batch = json.loads(
+        http("POST", f"{API_URL}/api/evaluate-batch", {"items": fit_rooms})[1]
+    )
+    check(
+        "拟合批次顺序与状态稳定（均为正常项）",
+        [i["room_id"] for i in fit_batch["items"]] == ["FIT-STABLE", "FIT-REVIEW"]
+        and [i["status"] for i in fit_batch["items"]] == ["ok", "ok"],
+        json.dumps(fit_batch, ensure_ascii=False),
+    )
+    for room, item in zip(fit_rooms, fit_batch["items"]):
+        single = json.loads(
+            http(
+                "POST",
+                f"{API_URL}/api/evaluate",
+                {k: v for k, v in room.items() if k != "room_id"},
+            )[1]
+        )
+        check(
+            f"{room['room_id']} 两入口拟合证据逐字段一致",
+            item["r_squared"] == single["r_squared"]
+            and item["fit_quality"] == single["fit_quality"]
+            and all(item[k] == v for k, v in single.items()),
+            f"batch={item} single={single}",
+        )
+    check(
+        "阈值两侧标签：稳定 / 需复查，且需复查不影响合格汇总",
+        [i["fit_quality"] for i in fit_batch["items"]] == ["stable", "needs_review"]
+        and f"{fit_batch['items'][0]['r_squared']:.4f}" == "0.9003"
+        and f"{fit_batch['items'][1]['r_squared']:.4f}" == "0.8697"
+        and [i["passed"] for i in fit_batch["items"]] == [True, True]
+        and fit_batch["summary"]
+        == {"total": 2, "ok": 2, "passed": 2, "failed": 0, "rejected": 0, "invalid": 0},
+        json.dumps(fit_batch, ensure_ascii=False),
+    )
+    # 经 Web 反代的单间拟合证据一致
+    proxied_fit = json.loads(
+        http(
+            "POST",
+            f"{WEB_URL}/api/evaluate",
+            {k: v for k, v in fit_rooms[1].items() if k != "room_id"},
+        )[1]
+    )
+    check(
+        "经 Web 反代的拟合证据一致",
+        proxied_fit["r_squared"] == fit_batch["items"][1]["r_squared"]
+        and proxied_fit["fit_quality"] == "needs_review"
+        and proxied_fit["passed"] is True,
+        json.dumps(proxied_fit, ensure_ascii=False),
+    )
 
     # 衰减异常项仍只含拒绝原因（多一个 room_id）
     rejected_item = batch["items"][2]
@@ -241,6 +404,12 @@ def main() -> None:
         "批量异常项只暴露 room_id/status/reason",
         set(rejected_item.keys()) == {"room_id", "status", "reason"} and bool(rejected_item["reason"]),
         json.dumps(rejected_item, ensure_ascii=False),
+    )
+    # 字段错误项不携带任何拟合证据
+    check(
+        "字段错误项不携带拟合证据",
+        "r_squared" not in batch["items"][3] and "fit_quality" not in batch["items"][3],
+        json.dumps(batch["items"][3], ensure_ascii=False),
     )
 
     # 字段错误项携带房间标识与可定位说明

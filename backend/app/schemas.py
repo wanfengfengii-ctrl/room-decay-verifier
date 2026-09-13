@@ -57,6 +57,9 @@ class EvaluateSuccess(BaseModel):
     peak_index: int
     limit_seconds: float
     passed: bool
+    # 拟合优度证据：R² 已钳制到 [0, 1]；fit_quality 仅提示是否复查，不参与合格判定
+    r_squared: float
+    fit_quality: Literal["stable", "needs_review"]
 
 
 class EvaluateRejected(BaseModel):
@@ -105,6 +108,8 @@ class BatchItemSuccess(BaseModel):
     peak_index: int
     limit_seconds: float
     passed: bool
+    r_squared: float
+    fit_quality: Literal["stable", "needs_review"]
 
 
 class BatchItemRejected(BaseModel):

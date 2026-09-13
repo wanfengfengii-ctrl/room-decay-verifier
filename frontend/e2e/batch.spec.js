@@ -29,6 +29,21 @@ function okRoomNoLimit(roomId, { t60 = 1.5 } = {}) {
   };
 }
 
+/**
+ * 确定性正弦扰动房间：扰动幅度决定 R²（与后端同一浮点序列）。
+ * wobble=0.3087 -> R²≈0.9003（稳定）；0.3095 -> R²≈0.8997（需复查）；
+ * 0.35 -> R²≈0.8697，T20≈0.564 仍在 1.0 上限内（需复查且合格）。
+ */
+function wobbleRoom(roomId, wobble, { limit = 1.0, period = 100, t60 = 1.5 } = {}) {
+  const pressure = Array.from({ length: 5000 }, (_, i) => {
+    const t = i / 1000;
+    return (
+      1000 * 10 ** ((-3 * t) / t60) * (1 + wobble * Math.sin((2 * Math.PI * i) / period)) + 0.25
+    );
+  });
+  return { room_id: roomId, sample_interval_ms: 1, pressure, limit_seconds: limit };
+}
+
 async function gotoBatch(page) {
   await page.goto('/');
   await page.getByTestId('mode-batch').click();
@@ -374,4 +389,126 @@ test('切换入口不残留另一入口的结论', async ({ page }) => {
   await expect(page.getByTestId('batch-result')).toHaveCount(0);
   // 单间组件已被重新挂载，旧结论同样不残留
   await expect(page.getByTestId('result-panel')).toHaveCount(0);
+});
+
+test('拟合质量列：正常行显示四位小数 R² 与稳定/需复查，异常与错误行为占位且不带证据', async ({ page }) => {
+  const payload = {
+    items: [
+      wobbleRoom('W-STABLE', 0.3087), // R²≈0.9003 稳定，T20≈0.564 合格
+      wobbleRoom('W-REVIEW', 0.35), // R²≈0.8697 需复查，T20≈0.564 仍合格
+      {
+        room_id: 'W-REJECTED',
+        sample_interval_ms: 1,
+        pressure: Array.from({ length: 1000 }, () => 5),
+        limit_seconds: 1.0,
+      },
+      {
+        room_id: 'W-INVALID',
+        sample_interval_ms: 0,
+        pressure: decayPressure(),
+        limit_seconds: 1.0,
+      },
+    ],
+  };
+
+  await gotoBatch(page);
+  await submitBatch(page, payload);
+
+  const rows = page.getByTestId('batch-row');
+  await expect(rows).toHaveCount(4);
+  // 房间顺序不被拟合标签改变
+  await expect(page.getByTestId('row-room-id')).toHaveText([
+    'W-STABLE',
+    'W-REVIEW',
+    'W-REJECTED',
+    'W-INVALID',
+  ]);
+
+  // 只有正常行渲染拟合质量证据
+  await expect(page.getByTestId('row-fit-r2')).toHaveText(['R²=0.9003', 'R²=0.8697']);
+  await expect(page.getByTestId('row-fit-label')).toHaveText(['稳定', '需复查']);
+
+  // 需复查不改判定：两间正常项均合格；异常 / 错误行拟合质量列为占位
+  await expect(page.getByTestId('row-verdict')).toHaveText(['合格', '合格', '不计入', '不计入']);
+  await expect(rows.nth(2).locator('td').nth(6)).toHaveText('—');
+  await expect(rows.nth(3).locator('td').nth(6)).toHaveText('—');
+
+  // 合格汇总只按 passed 统计，不受复查提示影响
+  const summary = page.getByTestId('batch-summary');
+  await expect(summary).toContainText('正常 2 间');
+  await expect(summary.locator('.pass')).toHaveText('2');
+  await expect(summary.locator('.fail')).toHaveText('0');
+});
+
+test('两入口对同一扰动采样给出相同的 R² 与拟合标签', async ({ page }) => {
+  const room = wobbleRoom('W-EVIDENCE', 0.35); // 需复查且合格
+
+  const single = await gotoSingleAndSubmit(page, {
+    sample_interval_ms: 1,
+    pressure: room.pressure,
+    limit_seconds: 1.0,
+  });
+  const singleR2 = await page.getByTestId('fit-r2').innerText();
+  const singleLabel = await page.getByTestId('fit-label').innerText();
+
+  await page.getByTestId('mode-batch').click();
+  await submitBatch(page, { items: [room] });
+
+  await expect(page.getByTestId('row-fit-r2')).toHaveText(singleR2);
+  await expect(page.getByTestId('row-fit-label')).toHaveText(singleLabel);
+  // 原有证据同样一致
+  await expect(page.getByTestId('row-slope')).toHaveText(single.slope);
+  await expect(page.getByTestId('row-t20')).toContainText(single.t20.replace(' s', ''));
+  await expect(page.getByTestId('row-points')).toHaveText(single.points);
+  // 标签不影响判定
+  await expect(page.getByTestId('row-verdict')).toHaveText('合格');
+});
+
+test('阈值边界：R² 略高于 0.9000 稳定，略低于则需复查', async ({ page }) => {
+  await gotoBatch(page);
+  await submitBatch(page, {
+    items: [wobbleRoom('JUST-ABOVE', 0.3087), wobbleRoom('JUST-BELOW', 0.3095)],
+  });
+  await expect(page.getByTestId('row-fit-r2')).toHaveText(['R²=0.9003', 'R²=0.8997']);
+  await expect(page.getByTestId('row-fit-label')).toHaveText(['稳定', '需复查']);
+});
+
+test('旧服务批量响应缺少新字段时显示暂无拟合质量，结论与顺序照常', async ({ page }) => {
+  // 模拟升级期间的旧后端：正常项没有 r_squared / fit_quality
+  await page.route('**/api/evaluate-batch', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        items: [
+          {
+            room_id: 'OLD-OK',
+            status: 'ok',
+            t20_seconds: 0.5,
+            points_used: 500,
+            slope: -40,
+            background: 0.25,
+            peak_index: 0,
+            limit_seconds: 1.0,
+            passed: true,
+          },
+          {
+            room_id: 'OLD-REJECTED',
+            status: 'rejected',
+            reason: '衰减曲线斜率非负，不符合混响衰减特征',
+          },
+        ],
+        summary: { total: 2, ok: 1, passed: 1, failed: 0, rejected: 1, invalid: 0 },
+      }),
+    }),
+  );
+
+  await gotoBatch(page);
+  await submitBatch(page, { items: [wobbleRoom('OLD-OK', 0), wobbleRoom('OLD-REJECTED', 0)] });
+
+  await expect(page.getByTestId('batch-row')).toHaveCount(2);
+  await expect(page.getByTestId('row-fit-label')).toHaveText(['暂无拟合质量']);
+  // 旧字段仍正常展示、判定不变、顺序不变
+  await expect(page.getByTestId('row-verdict')).toHaveText(['合格', '不计入']);
+  await expect(page.getByTestId('row-room-id')).toHaveText(['OLD-OK', 'OLD-REJECTED']);
 });

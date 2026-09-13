@@ -1,5 +1,6 @@
 import { useReducer, useRef, useState } from 'react';
 import { evaluateSample } from './api.js';
+import FitQuality from './FitQuality.jsx';
 import { formatSeconds, formatSlope } from './format.js';
 import { EXAMPLE_JSON } from './sample.js';
 import { initialState, submissionReducer } from './state.js';
@@ -88,7 +89,10 @@ export default function SingleReview() {
             </div>
             <div>
               <dt>斜率 (dB/s)</dt>
-              <dd data-testid="slope-value">{formatSlope(state.result.slope)}</dd>
+              <dd className="slope-cell">
+                <span data-testid="slope-value">{formatSlope(state.result.slope)}</span>
+                <FitQuality result={state.result} />
+              </dd>
             </div>
             <div>
               <dt>上限</dt>
@@ -101,6 +105,9 @@ export default function SingleReview() {
               </dd>
             </div>
           </dl>
+          <p className="hint fit-note">
+            拟合质量按回归 R² 提示是否值得现场复查（R² ≥ 0.9000 为稳定），不参与、也不改变上面的合格判定。
+          </p>
         </section>
       )}
 
