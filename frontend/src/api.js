@@ -12,10 +12,10 @@ function describeHttpError(status, body) {
   return `服务返回 HTTP ${status}`;
 }
 
-export async function evaluateSample(payload) {
+async function postJson(path, payload) {
   let resp;
   try {
-    resp = await fetch(`${API_BASE}/evaluate`, {
+    resp = await fetch(`${API_BASE}${path}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -33,4 +33,12 @@ export async function evaluateSample(payload) {
     throw new Error(describeHttpError(resp.status, body));
   }
   return resp.json();
+}
+
+export function evaluateSample(payload) {
+  return postJson('/evaluate', payload);
+}
+
+export function evaluateBatch(payload) {
+  return postJson('/evaluate-batch', payload);
 }

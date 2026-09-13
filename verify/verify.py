@@ -165,6 +165,146 @@ def main() -> None:
         status, body = http("POST", f"{API_URL}/api/evaluate", bad_payload)
         check(f"{name}返回 422 类型错误", status == 422, f"got {status}: {body}")
 
+    # 5c. 批量复核：混合批次顺序稳定、逐项证据与单独提交完全一致、汇总口径正确
+    rooms = [
+        {
+            "room_id": "ROOM-OK-1",
+            "sample_interval_ms": 1,
+            "pressure": make_decay(1.5),
+            "limit_seconds": 1.0,
+        },
+        {
+            "room_id": "ROOM-OK-2",
+            "sample_interval_ms": 1,
+            "pressure": make_decay(1.5),
+            "limit_seconds": 0.3,  # 同一采样更低上限 -> 不合格
+        },
+        {
+            "room_id": "ROOM-REJECTED",
+            "sample_interval_ms": 1,
+            "pressure": [5.0] * 1000,
+            "limit_seconds": 1.0,
+        },
+        {
+            "room_id": "ROOM-INVALID",
+            "sample_interval_ms": 0,  # 越界
+            "pressure": make_decay(1.5),
+            "limit_seconds": 1.0,
+        },
+        {
+            "room_id": "ROOM-OK-3",
+            "sample_interval_ms": 2,
+            "pressure": make_decay(2.1, dt_ms=2, n=4000),
+            "limit_seconds": 5.0,
+        },
+    ]
+    status, body = http("POST", f"{API_URL}/api/evaluate-batch", {"items": rooms})
+    check("混合批次返回 200", status == 200, body)
+    batch = json.loads(body)
+    check(
+        "items 保持输入顺序",
+        [i.get("room_id") for i in batch["items"]]
+        == ["ROOM-OK-1", "ROOM-OK-2", "ROOM-REJECTED", "ROOM-INVALID", "ROOM-OK-3"],
+        body,
+    )
+    statuses = [i["status"] for i in batch["items"]]
+    check("逐项状态为 ok/ok/rejected/invalid/ok", statuses == ["ok", "ok", "rejected", "invalid", "ok"], body)
+
+    # 每个正常项与单独提交所得证据完全一致（逐字段对比）
+    normal_indices = [i for i, s in enumerate(statuses) if s == "ok"]
+    single_bodies = {}
+    for idx in normal_indices:
+        room = rooms[idx]
+        single_body = http(
+            "POST",
+            f"{API_URL}/api/evaluate",
+            {k: v for k, v in room.items() if k != "room_id"},
+        )[1]
+        single_bodies[idx] = json.loads(single_body)
+        item = batch["items"][idx]
+        check(
+            f"房间 {room['room_id']} 批量证据与单独提交逐字段一致",
+            all(item[k] == v for k, v in single_bodies[idx].items()),
+            f"batch={item} single={single_body}",
+        )
+
+    # 首间正常项同时与独立 oracle 一致
+    first_ok = batch["items"][0]
+    check("批量首间 T20 与独立 oracle 一致", abs(first_ok["t20_seconds"] - exp_t20) < 1e-9)
+    check("批量首间取点数与 oracle 一致", first_ok["points_used"] == exp_points)
+    check("批量首间合格", first_ok["passed"] is True)
+    check("批量第二间超上限不合格", batch["items"][1]["passed"] is False)
+
+    # 衰减异常项仍只含拒绝原因（多一个 room_id）
+    rejected_item = batch["items"][2]
+    check(
+        "批量异常项只暴露 room_id/status/reason",
+        set(rejected_item.keys()) == {"room_id", "status", "reason"} and bool(rejected_item["reason"]),
+        json.dumps(rejected_item, ensure_ascii=False),
+    )
+
+    # 字段错误项携带房间标识与可定位说明
+    invalid_item = batch["items"][3]
+    check(
+        "字段错误项携带房间标识与字段定位",
+        invalid_item["room_id"] == "ROOM-INVALID"
+        and invalid_item["index"] == 3
+        and any(e.get("field") == "sample_interval_ms" and e.get("message") for e in invalid_item["errors"]),
+        json.dumps(invalid_item, ensure_ascii=False),
+    )
+
+    check(
+        "汇总只统计正常项",
+        batch["summary"] == {"total": 5, "ok": 3, "passed": 2, "failed": 1, "rejected": 1, "invalid": 1},
+        json.dumps(batch["summary"], ensure_ascii=False),
+    )
+
+    # 部分失败批次的原始字节与再次请求一致（确定性）
+    _, body_batch_again = http("POST", f"{API_URL}/api/evaluate-batch", {"items": rooms})
+    check("混合批次两次响应完全一致", body == body_batch_again)
+
+    # room_id 重复：整批请求级拒绝
+    status, body = http(
+        "POST",
+        f"{API_URL}/api/evaluate-batch",
+        {"items": [rooms[0], {**rooms[1], "room_id": "ROOM-OK-1"}]},
+    )
+    check("重复 room_id 整批拒绝为 400", status == 400 and "ROOM-OK-1" in body, f"got {status}: {body}")
+
+    # 无法解析的批次：请求级 400，而不是逐项错误
+    req = urllib.request.Request(
+        f"{API_URL}/api/evaluate-batch",
+        data=b'{"items": [',
+        method="POST",
+    )
+    req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            bad_status, bad_body = resp.status, resp.read().decode()
+    except urllib.error.HTTPError as exc:
+        bad_status, bad_body = exc.code, exc.read().decode()
+    check("整批无法解析返回 400", bad_status == 400 and "JSON" in bad_body, f"got {bad_status}: {bad_body}")
+
+    # 空批次 / 超过 20 间：请求级 400
+    check("空批次返回 400", http("POST", f"{API_URL}/api/evaluate-batch", {"items": []})[0] == 400)
+    too_many = {"items": [{**{k: v for k, v in rooms[0].items() if k != "room_id"}, "room_id": f"R{i}"} for i in range(21)]}
+    check("21 间批次返回 400", http("POST", f"{API_URL}/api/evaluate-batch", too_many)[0] == 400)
+
+    # 经 Web 反代的批量链路可用，结论一致
+    status, body = http("POST", f"{WEB_URL}/api/evaluate-batch", {"items": [rooms[0]]})
+    proxied = json.loads(body)
+    check(
+        "经 Web 反代批量结论一致",
+        status == 200 and proxied["items"][0]["t20_seconds"] == exp_t20,
+        body,
+    )
+    status, body = http(
+        "POST",
+        f"{WEB_URL}/api/evaluate-batch",
+        {"items": [rooms[0], {**rooms[1], "room_id": "ROOM-OK-1"}]},
+    )
+    check("经 Web 反代重复 room_id 同样整批拒绝", status == 400, f"got {status}")
+
     # 6. Web 前端可达，且经 Web 反代的 API 可用
     status, body = http("GET", f"{WEB_URL}/")
     check("Web 首页 200", status == 200 and "root" in body, f"got {status}")

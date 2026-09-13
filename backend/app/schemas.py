@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from typing import Annotated, Literal, Union
+from typing import Annotated, Literal, Optional, Union
 
 from pydantic import BaseModel, BeforeValidator, Field, field_validator
 
@@ -22,8 +22,16 @@ def _require_json_number(value: object) -> object:
     return value
 
 
+def _require_json_str(value: object) -> object:
+    """只接受 JSON 字符串：数字、布尔、null 一律视为类型错误。"""
+    if not isinstance(value, str):
+        raise ValueError("room_id 必须是字符串")
+    return value
+
+
 StrictJsonInt = Annotated[int, BeforeValidator(_require_json_int)]
 StrictJsonNumber = Annotated[float, BeforeValidator(_require_json_number)]
+StrictJsonStr = Annotated[str, BeforeValidator(_require_json_str)]
 
 
 class EvaluateRequest(BaseModel):
@@ -57,3 +65,79 @@ class EvaluateRejected(BaseModel):
 
 
 EvaluateResponse = Union[EvaluateSuccess, EvaluateRejected]
+
+
+# ---------- 批量复核 ----------
+
+
+class BatchEvaluateItem(EvaluateRequest):
+    """批量中的单个房间：复用单次三字段的全部约束，另加 room_id。"""
+
+    room_id: StrictJsonStr = Field(min_length=1, max_length=100)
+
+    @field_validator("room_id")
+    @classmethod
+    def _room_id_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("room_id 不能为空白字符串")
+        return value
+
+
+class BatchItemSuccess(BaseModel):
+    """正常项：证据字段与 /api/evaluate 的成功响应完全一致，仅多 room_id。"""
+
+    room_id: str
+    status: Literal["ok"] = "ok"
+    t20_seconds: float
+    points_used: int
+    slope: float
+    background: float
+    peak_index: int
+    limit_seconds: float
+    passed: bool
+
+
+class BatchItemRejected(BaseModel):
+    """衰减异常项：仍然只暴露拒绝原因，不泄露任何计算字段。"""
+
+    room_id: str
+    status: Literal["rejected"] = "rejected"
+    reason: str
+
+
+class BatchFieldError(BaseModel):
+    """可定位到具体字段的错误说明。"""
+
+    field: str
+    message: str
+
+
+class BatchItemInvalid(BaseModel):
+    """字段错误项：携带房间标识（room_id 本身缺失时为 null，用 index 定位）。"""
+
+    status: Literal["invalid"] = "invalid"
+    index: int
+    room_id: Optional[str] = None
+    errors: list[BatchFieldError]
+
+
+BatchItemResponse = Annotated[
+    Union[BatchItemSuccess, BatchItemRejected, BatchItemInvalid],
+    Field(discriminator="status"),
+]
+
+
+class BatchSummary(BaseModel):
+    """整批汇总：只有正常项（ok）计入合格统计。"""
+
+    total: int
+    ok: int
+    passed: int
+    failed: int
+    rejected: int
+    invalid: int
+
+
+class BatchEvaluateResponse(BaseModel):
+    items: list[BatchItemResponse]
+    summary: BatchSummary

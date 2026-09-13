@@ -98,3 +98,99 @@ dd {
 .fail {
   color: #dc2626;
 }
+
+/* ---------- 模式切换 ---------- */
+
+.mode-switch {
+  display: inline-flex;
+  gap: 0;
+  margin: 4px 0 16px;
+  border: 1px solid #2563eb;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.mode-btn {
+  border: none;
+  border-radius: 0;
+  background: #fff;
+  color: #2563eb;
+  padding: 8px 22px;
+}
+
+.mode-btn.active {
+  background: #2563eb;
+  color: #fff;
+}
+
+/* ---------- 批量结果 ---------- */
+
+.summary {
+  border-left: 6px solid #2563eb;
+  margin-bottom: 16px;
+}
+
+.batch-table {
+  width: 100%;
+  border-collapse: collapse;
+  background: #fff;
+  border-radius: 10px;
+  overflow: hidden;
+  font-size: 14px;
+}
+
+.batch-table th,
+.batch-table td {
+  border: 1px solid #e3e9f0;
+  padding: 8px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.batch-table th {
+  background: #eef3fa;
+  color: #374151;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.batch-table tr.row-ok td:first-child {
+  border-left: 4px solid #16a34a;
+}
+
+.batch-table tr.row-rejected td:first-child {
+  border-left: 4px solid #d97706;
+}
+
+.batch-table tr.row-invalid td:first-child {
+  border-left: 4px solid #dc2626;
+}
+
+.tag {
+  display: inline-block;
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.tag-ok {
+  background: #dcfce7;
+  color: #15803d;
+}
+
+.tag-rejected {
+  background: #fef3c7;
+  color: #b45309;
+}
+
+.tag-invalid {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+.batch-table .detail {
+  color: #6b7280;
+  min-width: 220px;
+}

@@ -19,6 +19,39 @@
 | `pressure` | 200 至 20000 个大于零的数 |
 | `limit_seconds` | 0.30 至 5.00 |
 
+## 批量复核 `POST /api/evaluate-batch`
+
+工程师一次验收多间会议室时，前端切换到「批量复核」并上传 1 至 20 个房间的 JSON：
+
+```json
+{
+  "items": [
+    {"room_id": "A101", "sample_interval_ms": 1, "pressure": [...], "limit_seconds": 1.0},
+    {"room_id": "A102", "sample_interval_ms": 1, "pressure": [...], "limit_seconds": 1.0}
+  ]
+}
+```
+
+- 每项以 `room_id`（非空字符串）标识，并复用单次入口的采样间隔、压力序列和上限字段；
+- 后端逐项调用同一个 T20 计算，正常项证据与 `/api/evaluate` 单独提交完全一致；
+- `items` 严格保持输入顺序，响应形如：
+
+```json
+{
+  "items": [
+    {"room_id": "A101", "status": "ok", "t20_seconds": 0.5, "...": "正常项保留全部证据字段"},
+    {"room_id": "A102", "status": "rejected", "reason": "衰减异常项仍只含拒绝原因"},
+    {"status": "invalid", "index": 2, "room_id": "B-03", "errors": [{"field": "pressure", "message": "长度不足（最小长度：200）"}]}
+  ],
+  "summary": {"total": 3, "ok": 1, "passed": 1, "failed": 0, "rejected": 1, "invalid": 1}
+}
+```
+
+- 部分失败（衰减异常 / 字段错误）不影响其余房间；汇总只统计正常项（`ok`）的合格与不合格；
+- `room_id` 缺失时该项 `room_id` 为 `null`，凭 `index`（从 0 起）与字段错误定位；
+- 整批无法解析、请求体不含 `items` 数组、房间数超出 1–20、或 `room_id` 重复，均返回请求级
+  `400 {"detail": "..."}`，整批拒绝、不产生任何逐项结论。
+
 ## Docker Compose 运行（推荐）
 
 ```bash
@@ -41,7 +74,7 @@ docker compose up --build verify   # 或 docker compose run --rm verify
 echo $?                            # 0 = 验收通过
 ```
 
-它对真实服务做端到端断言：独立 oracle 复算 T20/斜率/取点数、相等算合格、同一采样两次响应逐字节一致、异常衰减只暴露拒绝原因、非法输入 422、Web 反代链路一致。
+它对真实服务做端到端断言：独立 oracle 复算 T20/斜率/取点数、相等算合格、同一采样两次响应逐字节一致、异常衰减只暴露拒绝原因、非法输入 422、混合批次顺序稳定且正常项证据与单独提交一致、汇总只计正常项、重复 `room_id` 与无法解析批次被整批拒绝、Web 反代链路一致。
 
 ## 本地开发
 
