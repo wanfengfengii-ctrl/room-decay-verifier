@@ -255,6 +255,25 @@ def test_non_finite_common_limits_reject_whole_batch():
         assert resp.json()["detail"] == "统一限值必须是0.30至5.00的JSON数字"
 
 
+def test_huge_integer_common_limit_rejects_whole_batch_not_500():
+    """任意精度巨整型统一限值：越界即整批 400，不得因转换溢出返回 500。"""
+    for bad in (10**400, -(10**400), 10**6):
+        resp = post_batch({"items": [valid_room("R")], "common_limit_seconds": bad})
+        assert resp.status_code == 400, f"{bad} 应整批拒绝：{resp.text}"
+        assert resp.json()["detail"] == COMMON_LIMIT_ERROR_MESSAGE
+        assert resp.json()["detail"] == "统一限值必须是0.30至5.00的JSON数字"
+        assert "items" not in resp.json()
+
+
+def test_in_range_integer_common_limit_accepted():
+    """区间内的整型统一限值照常生效（巨整型修复不改变合法整数口径）。"""
+    resp = post_batch({"items": [without_limit(valid_room("INT"))], "common_limit_seconds": 2})
+    assert resp.status_code == 200, resp.text
+    item = resp.json()["items"][0]
+    assert item["status"] == "ok"
+    assert item["limit_seconds"] == 2.0
+
+
 def test_invalid_common_limit_produces_no_item_results():
     """整批拒绝：响应不含任何逐项结论，即使条目本身合法。"""
     resp = post_batch(

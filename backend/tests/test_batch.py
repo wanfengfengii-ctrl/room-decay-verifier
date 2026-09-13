@@ -263,12 +263,96 @@ def test_non_object_array_element_is_invalid():
         assert bad["errors"]
 
 
+def test_lone_surrogate_room_id_is_locatable_invalid_item():
+    """孤立代理转义的房间标识：逐项 invalid，无法编码的标识置 null、凭 index 定位。"""
+    body = (
+        b'{"items": ['
+        + json.dumps(valid_room("OK-1")).encode()
+        + b', {"room_id": "\\ud800", "sample_interval_ms": 1, "pressure": '
+        + json.dumps(make_decay()).encode()
+        + b', "limit_seconds": 1.0}, '
+        + json.dumps(valid_room("OK-2")).encode()
+        + b"]}"
+    )
+    resp = post_batch(body)
+    assert resp.status_code == 200, resp.text
+    payload = resp.json()
+    assert [i["status"] for i in payload["items"]] == ["ok", "invalid", "ok"]
+    bad = payload["items"][1]
+    assert bad["index"] == 1
+    # 孤立代理标识无法编码进响应，不能原样回传
+    assert bad["room_id"] is None
+    id_errors = [e for e in bad["errors"] if e["field"] == "room_id"]
+    assert id_errors and "孤立代理" in id_errors[0]["message"]
+    # 错误行不遮蔽其余房间
+    assert payload["items"][0]["room_id"] == "OK-1"
+    assert payload["items"][2]["room_id"] == "OK-2"
+    assert payload["summary"]["ok"] == 2
+    assert payload["summary"]["invalid"] == 1
+
+
+def test_lone_surrogate_ids_are_per_item_errors_not_duplicates():
+    """两个相同的孤立代理标识是各自格式错误，不构成真实房间重名的整批拒绝。"""
+    item = (
+        b'{"room_id": "\\ud800", "sample_interval_ms": 1, "pressure": '
+        + json.dumps(make_decay()).encode()
+        + b', "limit_seconds": 1.0}'
+    )
+    resp = post_batch(b'{"items": [' + item + b", " + item + b"]}")
+    assert resp.status_code == 200, resp.text
+    assert [i["status"] for i in resp.json()["items"]] == ["invalid", "invalid"]
+
+
+def test_astral_room_id_evaluated_and_echoed():
+    """合法代理对（astral 字符）标识照常复核并原样回传。"""
+    body = (
+        b'{"items": [{"room_id": "ROOM-\\ud83d\\ude00", "sample_interval_ms": 1, "pressure": '
+        + json.dumps(make_decay()).encode()
+        + b', "limit_seconds": 1.0}]}'
+    )
+    resp = post_batch(body)
+    assert resp.status_code == 200, resp.text
+    item = resp.json()["items"][0]
+    assert item["status"] == "ok"
+    assert item["room_id"] == "ROOM-\U0001f600"
+
+
 # ---------- 请求级错误 ----------
 
 
 def test_unparseable_json_is_request_error():
     resp = post_batch(b'{"items": [')
     assert resp.status_code == 400
+    assert "JSON" in resp.json()["detail"]
+
+
+def test_non_finite_numbers_in_pressure_reject_whole_batch():
+    """压力数组混入 NaN / ±Infinity（非法 JSON 数值）：视为正文无法解析，整批 400。"""
+    for token in (b"NaN", b"Infinity", b"-Infinity"):
+        elements = json.dumps(make_decay()).encode()[1:-1].split(b",")
+        elements[100] = token
+        pressure = b"[" + b",".join(elements) + b"]"
+        body = (
+            b'{"items": [{"room_id": "R-NON-FINITE", "sample_interval_ms": 1, "pressure": '
+            + pressure
+            + b', "limit_seconds": 1.0}]}'
+        )
+        resp = post_batch(body)
+        assert resp.status_code == 400, f"{token} 应整批拒绝：{resp.text}"
+        assert "JSON" in resp.json()["detail"]
+        # 整批拒绝：不产生任何逐项结论
+        assert "items" not in resp.json()
+
+
+def test_non_finite_item_limit_rejects_whole_batch_even_with_common_limit():
+    """条目残留 NaN 旧限值同样不是合法 JSON：即使启用统一限值也整批拒绝。"""
+    body = (
+        b'{"items": [{"room_id": "R-NAN-LIMIT", "sample_interval_ms": 1, "pressure": '
+        + json.dumps(make_decay()).encode()
+        + b', "limit_seconds": NaN}], "common_limit_seconds": 1.0}'
+    )
+    resp = post_batch(body)
+    assert resp.status_code == 400, resp.text
     assert "JSON" in resp.json()["detail"]
 
 

@@ -22,10 +22,22 @@ def _require_json_number(value: object) -> object:
     return value
 
 
+def is_utf8_encodable(value: str) -> bool:
+    """能否按 UTF-8 编码：孤立代理（如 \\ud800）无法编码，响应序列化会失败。"""
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def _require_json_str(value: object) -> object:
-    """只接受 JSON 字符串：数字、布尔、null 一律视为类型错误。"""
+    """只接受可原样回传的 JSON 字符串：数字、布尔、null 视为类型错误；
+    孤立代理等无法按 UTF-8 编码的字符串同样拒绝（响应无法携带该标识）。"""
     if not isinstance(value, str):
         raise ValueError("room_id 必须是字符串")
+    if not is_utf8_encodable(value):
+        raise ValueError("room_id 包含无法编码的孤立代理字符")
     return value
 
 

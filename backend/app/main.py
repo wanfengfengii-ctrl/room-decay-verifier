@@ -23,6 +23,7 @@ from .schemas import (
     EvaluateRequest,
     EvaluateResponse,
     EvaluateSuccess,
+    is_utf8_encodable,
 )
 from .t20 import evaluate_t20
 
@@ -50,6 +51,27 @@ class BatchRequestError(Exception):
     def __init__(self, message: str) -> None:
         super().__init__(message)
         self.message = message
+
+
+# NaN / Infinity / -Infinity 不是合法 JSON 数值字面量（RFC 8259），
+# Python 的 json 默认宽容接受；解析时改以哨兵占位，便于按“正文无法解析”处理。
+_NON_FINITE_CONSTANT = object()
+
+
+def _non_finite_constant(_token: str) -> object:
+    """json.loads 的 parse_constant 钩子：非有限数字面量一律替换为哨兵。"""
+    return _NON_FINITE_CONSTANT
+
+
+def _contains_non_finite_constant(value: object) -> bool:
+    """解析后的数据中是否混入 NaN / Infinity 哨兵。"""
+    if value is _NON_FINITE_CONSTANT:
+        return True
+    if isinstance(value, list):
+        return any(_contains_non_finite_constant(item) for item in value)
+    if isinstance(value, dict):
+        return any(_contains_non_finite_constant(item) for item in value.values())
+    return False
 
 
 @app.exception_handler(BatchRequestError)
@@ -193,7 +215,10 @@ def _parse_common_limit(body: dict) -> Optional[float]:
     if (
         isinstance(value, bool)
         or not isinstance(value, (int, float))
-        or not math.isfinite(value)
+        # 整数任意精度恒为有限数，isfinite 只用于浮点：
+        # 对巨整型调 isfinite 会先转 float 而溢出（OverflowError），
+        # 越界交给下方的区间比较（巨整型与浮点边界可精确比较）。
+        or (isinstance(value, float) and not math.isfinite(value))
         or not (COMMON_LIMIT_MIN <= value <= COMMON_LIMIT_MAX)
     ):
         raise BatchRequestError(COMMON_LIMIT_ERROR_MESSAGE)
@@ -204,7 +229,7 @@ def _parse_common_limit(body: dict) -> Optional[float]:
 async def evaluate_batch(request: Request) -> BatchEvaluateResponse:
     # 手动解析：整批无法解析属于请求级错误，不能下沉为逐项错误。
     try:
-        body = json.loads(await request.body())
+        body = json.loads(await request.body(), parse_constant=_non_finite_constant)
     except (json.JSONDecodeError, UnicodeDecodeError):
         raise BatchRequestError("请求体不是合法 JSON，整批无法解析")
 
@@ -214,6 +239,11 @@ async def evaluate_batch(request: Request) -> BatchEvaluateResponse:
     # 统一限值是请求级字段：非法即整批拒绝，先于任何逐项校验。
     common_limit = _parse_common_limit(body)
 
+    # 条目数据混入 NaN / Infinity 字面量：不是合法 JSON，视为正文无法解析，
+    # 整批拒绝，而不是降级为逐房间字段错误。
+    if _contains_non_finite_constant(body["items"]):
+        raise BatchRequestError("请求体不是合法 JSON，整批无法解析")
+
     raw_items = body["items"]
     if not (BATCH_MIN_ITEMS <= len(raw_items) <= BATCH_MAX_ITEMS):
         raise BatchRequestError(
@@ -221,13 +251,14 @@ async def evaluate_batch(request: Request) -> BatchEvaluateResponse:
             f"当前为 {len(raw_items)} 个"
         )
 
-    # room_id 重复在整批层面拒绝；非字符串 / 空白等不合法标识不参与重复判定，
-    # 留给逐项校验（两个空 ID 是各自格式错误，而非真实房间重名）。
+    # room_id 重复在整批层面拒绝；非字符串 / 空白 / 无法编码的标识不参与重复判定，
+    # 留给逐项校验（两个空 ID 是各自格式错误，而非真实房间重名；
+    # 孤立代理标识无法编码进响应，同样各自按字段错误处理）。
     seen_room_ids: set[str] = set()
     for raw in raw_items:
         if isinstance(raw, dict) and isinstance(raw.get("room_id"), str):
             room_id = raw["room_id"]
-            if not room_id.strip():
+            if not room_id.strip() or not is_utf8_encodable(room_id):
                 continue
             if room_id in seen_room_ids:
                 raise BatchRequestError(f'room_id 重复："{room_id}"，整批已拒绝')
@@ -273,7 +304,12 @@ async def evaluate_batch(request: Request) -> BatchEvaluateResponse:
             items.append(
                 BatchItemInvalid(
                     index=index,
-                    room_id=room_id if isinstance(room_id, str) else None,
+                    # 无法编码的标识（孤立代理）不能原样回传，置 null、凭 index 定位
+                    room_id=(
+                        room_id
+                        if isinstance(room_id, str) and is_utf8_encodable(room_id)
+                        else None
+                    ),
                     errors=errors,
                 )
             )
