@@ -1,0 +1,39 @@
+name: t20-review
+
+services:
+  api:
+    build: ./backend
+    image: t20-review-api
+    ports:
+      - "${API_PORT:-8000}:8000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request;urllib.request.urlopen('http://localhost:8000/api/health')"
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+  web:
+    build: ./frontend
+    image: t20-review-web
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    depends_on:
+      - api
+
+  verify:
+    build: ./verify
+    image: t20-review-verify
+    depends_on:
+      api:
+        condition: service_healthy
+      web:
+        condition: service_started
+    environment:
+      API_URL: http://api:8000
+      WEB_URL: http://web
+    restart: "no"
