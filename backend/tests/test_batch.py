@@ -202,6 +202,58 @@ def test_blank_and_non_string_room_ids_are_invalid_not_request_errors():
     assert any("room_id" in e["field"] for e in body["items"][1]["errors"])
 
 
+# ---------- 房间标识错误定位 ----------
+
+
+def test_room_id_over_100_chars_still_evaluated():
+    """超过 100 字符的非空标识不是字段错误：照常复核并返回该房间结论。"""
+    long_id = "R" * 150
+    room = valid_room(long_id)
+    resp = post_batch({"items": [room]})
+    assert resp.status_code == 200, resp.text
+    item = resp.json()["items"][0]
+    assert item["status"] == "ok"
+    assert item["room_id"] == long_id
+    single = client.post(
+        "/api/evaluate", json={k: v for k, v in room.items() if k != "room_id"}
+    ).json()
+    for key, value in single.items():
+        assert item[key] == value, f"{key} 与单次提交不一致"
+
+
+def test_room_id_length_has_no_upper_bound():
+    rooms = [valid_room("B" * 100), valid_room("B" * 101)]
+    body = post_batch({"items": rooms}).json()
+    assert [i["status"] for i in body["items"]] == ["ok", "ok"]
+
+
+def test_non_string_room_id_is_type_error_with_null_room_id_and_index():
+    """数字标识：room_id 为 null，凭 index 定位，字段错误明确指出类型不符。"""
+    body = post_batch(
+        {"items": [valid_room("OK-1"), {**valid_room("ignored"), "room_id": 42}]}
+    ).json()
+    assert [i["status"] for i in body["items"]] == ["ok", "invalid"]
+    bad = body["items"][1]
+    assert bad["room_id"] is None
+    assert bad["index"] == 1
+    id_errors = [e for e in bad["errors"] if e["field"] == "room_id"]
+    assert id_errors and "字符串" in id_errors[0]["message"]
+    # 错误行不遮蔽其余房间
+    assert body["items"][0]["room_id"] == "OK-1"
+
+
+def test_blank_room_id_invalid_item_keeps_position_and_blank_detail():
+    """空白标识：逐项 invalid，凭 index 定位，字段错误指出空白原因。"""
+    body = post_batch({"items": [valid_room("OK-1"), valid_room("   ")]}).json()
+    assert [i["status"] for i in body["items"]] == ["ok", "invalid"]
+    bad = body["items"][1]
+    assert bad["index"] == 1
+    # 原始空白标识原样回传，便于界面区分“空白”与“缺失/类型错误”
+    assert bad["room_id"] == "   "
+    id_errors = [e for e in bad["errors"] if e["field"] == "room_id"]
+    assert id_errors and "空白" in id_errors[0]["message"]
+
+
 def test_non_object_array_element_is_invalid():
     body = post_batch({"items": [42, "oops", None, valid_room("OK")]}).json()
     assert [i["status"] for i in body["items"]] == ["invalid", "invalid", "invalid", "ok"]

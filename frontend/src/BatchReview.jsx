@@ -1,6 +1,6 @@
 import { useReducer, useRef, useState } from 'react';
 import { evaluateBatch } from './api.js';
-import { formatSeconds, formatSlope } from './format.js';
+import { formatBatchRoomId, formatSeconds, formatSlope } from './format.js';
 import { BATCH_EXAMPLE_JSON } from './sample.js';
 import { batchReducer, initialBatchState } from './batchState.js';
 
@@ -161,7 +161,7 @@ export default function BatchReview() {
                   data-status={item.status}
                 >
                   <td>{i + 1}</td>
-                  <td data-testid="row-room-id">{item.room_id ?? `（第 ${item.index + 1} 项缺少 room_id）`}</td>
+                  <td data-testid="row-room-id">{formatBatchRoomId(item)}</td>
                   <td data-testid="row-status">
                     <span className={`tag tag-${item.status}`}>{STATUS_TEXT[item.status]}</span>
                   </td>

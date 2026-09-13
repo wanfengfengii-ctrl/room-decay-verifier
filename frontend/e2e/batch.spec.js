@@ -187,6 +187,42 @@ test('缺少 room_id 的行可定位且其余行正常', async ({ page }) => {
   await expect(rows.nth(1).getByTestId('row-room-id')).toHaveText('KEPT');
 });
 
+test('房间标识错误定位：超长标识照常复核，数字与空白标识显示项目位置', async ({ page }) => {
+  const longId = `LONG-${'R'.repeat(120)}`;
+  await gotoBatch(page);
+  await submitBatch(page, {
+    items: [
+      okRoom(longId),
+      { ...okRoom('ignored'), room_id: 42 },
+      { ...okRoom('blank'), room_id: '   ' },
+      okRoom('TAIL-OK'),
+    ],
+  });
+
+  const rows = page.getByTestId('batch-row');
+  await expect(rows).toHaveCount(4);
+
+  // 超过 100 字符的非空标识不是字段错误：照常复核并展示结论
+  await expect(rows.nth(0)).toHaveClass(/row-ok/);
+  await expect(rows.nth(0).getByTestId('row-room-id')).toHaveText(longId);
+  await expect(rows.nth(0).getByTestId('row-verdict')).toHaveText(/^(合格|不合格)$/);
+
+  // 数字标识：房间列指出类型错误与项目位置，而不是“缺少 room_id”
+  await expect(rows.nth(1)).toHaveClass(/row-invalid/);
+  await expect(rows.nth(1).getByTestId('row-room-id')).toContainText('第 2 项');
+  await expect(rows.nth(1).getByTestId('row-room-id')).toContainText('类型错误');
+  await expect(rows.nth(1).getByTestId('row-errors')).toContainText('room_id');
+
+  // 空白标识：房间列显示项目位置，不渲染空白单元格
+  await expect(rows.nth(2)).toHaveClass(/row-invalid/);
+  await expect(rows.nth(2).getByTestId('row-room-id')).toContainText('第 3 项');
+  await expect(rows.nth(2).getByTestId('row-room-id')).not.toHaveText(/^\s*$/);
+
+  // 其余房间结论不受影响
+  await expect(rows.nth(3)).toHaveClass(/row-ok/);
+  await expect(rows.nth(3).getByTestId('row-room-id')).toHaveText('TAIL-OK');
+});
+
 test('20 个房间的批次顺序稳定', async ({ page }) => {
   const rooms = Array.from({ length: 20 }, (_, i) =>
     okRoom(`ROOM-${String(i + 1).padStart(2, '0')}`, { limit: 5.0 }),

@@ -71,9 +71,13 @@ EvaluateResponse = Union[EvaluateSuccess, EvaluateRejected]
 
 
 class BatchEvaluateItem(EvaluateRequest):
-    """批量中的单个房间：复用单次三字段的全部约束，另加 room_id。"""
+    """批量中的单个房间：复用单次三字段的全部约束，另加 room_id。
 
-    room_id: StrictJsonStr = Field(min_length=1, max_length=100)
+    room_id 只要求是非空非空白字符串，不设长度上限：
+    超长标识照常复核并返回该房间结论，而不是判为字段错误。
+    """
+
+    room_id: StrictJsonStr = Field(min_length=1)
 
     @field_validator("room_id")
     @classmethod

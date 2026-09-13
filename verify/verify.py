@@ -290,6 +290,59 @@ def main() -> None:
     too_many = {"items": [{**{k: v for k, v in rooms[0].items() if k != "room_id"}, "room_id": f"R{i}"} for i in range(21)]}
     check("21 间批次返回 400", http("POST", f"{API_URL}/api/evaluate-batch", too_many)[0] == 400)
 
+    # 5d. 房间标识错误定位：超长标识照常复核；数字 / 空白标识逐项 invalid 且可定位
+    long_room_id = "LONG-" + "R" * 120
+    status, body = http(
+        "POST",
+        f"{API_URL}/api/evaluate-batch",
+        {
+            "items": [
+                {**rooms[0], "room_id": long_room_id},
+                {**rooms[0], "room_id": 42},
+                {**rooms[0], "room_id": "   "},
+            ]
+        },
+    )
+    check("标识定位批次返回 200", status == 200, body)
+    locate = json.loads(body)
+    long_item = locate["items"][0]
+    check(
+        "超过 100 字符的非空标识照常复核并返回结论",
+        long_item["status"] == "ok"
+        and long_item["room_id"] == long_room_id
+        and abs(long_item["t20_seconds"] - exp_t20) < 1e-9,
+        json.dumps(long_item, ensure_ascii=False),
+    )
+    numeric_item = locate["items"][1]
+    check(
+        "数字标识逐项 invalid：room_id 为 null、凭 index 定位、错误指出类型不符",
+        numeric_item["status"] == "invalid"
+        and numeric_item["room_id"] is None
+        and numeric_item["index"] == 1
+        and any(
+            e.get("field") == "room_id" and "字符串" in e.get("message", "")
+            for e in numeric_item["errors"]
+        ),
+        json.dumps(numeric_item, ensure_ascii=False),
+    )
+    blank_item = locate["items"][2]
+    check(
+        "空白标识逐项 invalid：凭 index 定位、字段错误指出空白",
+        blank_item["status"] == "invalid"
+        and blank_item["index"] == 2
+        and any(
+            e.get("field") == "room_id" and "空白" in e.get("message", "")
+            for e in blank_item["errors"]
+        ),
+        json.dumps(blank_item, ensure_ascii=False),
+    )
+    check(
+        "标识定位批次汇总只计正常项",
+        locate["summary"]
+        == {"total": 3, "ok": 1, "passed": 1, "failed": 0, "rejected": 0, "invalid": 2},
+        json.dumps(locate["summary"], ensure_ascii=False),
+    )
+
     # 经 Web 反代的批量链路可用，结论一致
     status, body = http("POST", f"{WEB_URL}/api/evaluate-batch", {"items": [rooms[0]]})
     proxied = json.loads(body)
