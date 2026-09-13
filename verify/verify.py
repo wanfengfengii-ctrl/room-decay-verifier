@@ -156,6 +156,15 @@ def main() -> None:
     )
     check("过短采样返回 422", status == 422, f"got {status}")
 
+    # 5b. 类型错误（字符串压力 / 布尔间隔）必须直接拒绝，不得强转
+    for name, bad_payload in [
+        ("字符串压力", {**payload, "pressure": ["5.0"] * 200}),
+        ("布尔采样间隔", {**payload, "sample_interval_ms": True}),
+        ("字符串上限", {**payload, "limit_seconds": "1.0"}),
+    ]:
+        status, body = http("POST", f"{API_URL}/api/evaluate", bad_payload)
+        check(f"{name}返回 422 类型错误", status == 422, f"got {status}: {body}")
+
     # 6. Web 前端可达，且经 Web 反代的 API 可用
     status, body = http("GET", f"{WEB_URL}/")
     check("Web 首页 200", status == 200 and "root" in body, f"got {status}")

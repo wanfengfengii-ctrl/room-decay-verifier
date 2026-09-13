@@ -187,12 +187,22 @@ def test_rejection_payload_contains_only_reason():
         {"sample_interval_ms": 0},
         {"sample_interval_ms": 101},
         {"sample_interval_ms": 1.5},
+        {"sample_interval_ms": True},
+        {"sample_interval_ms": False},
+        {"sample_interval_ms": "5"},
         {"limit_seconds": 0.29},
         {"limit_seconds": 5.01},
+        {"limit_seconds": True},
+        {"limit_seconds": "1.0"},
         {"pressure": [1.0] * 199},
         {"pressure": [1.0] * 20001},
         {"pressure": [1.0] * 199 + [0.0] + [1.0]},
         {"pressure": [1.0] * 199 + [-2.0] + [1.0]},
+        {"pressure": ["5.0"] * 200},
+        {"pressure": [True] * 200},
+        {"pressure": [1.0] * 199 + ["3.0"]},
+        {"pressure": [1.0] * 199 + [False]},
+        {"pressure": [None] * 200},
     ],
 )
 def test_invalid_payloads_return_422(override):
@@ -204,6 +214,29 @@ def test_invalid_payloads_return_422(override):
     payload.update(override)
     resp = client.post("/api/evaluate", json=payload)
     assert resp.status_code == 422
+
+
+def test_integer_json_numbers_are_accepted():
+    # JSON 整数是合法数字，不应被严格类型校验误伤
+    payload = {
+        "sample_interval_ms": 1,
+        "pressure": [int(p) for p in make_decay(1.5, offset=1.0)],
+        "limit_seconds": 1,
+    }
+    resp = client.post("/api/evaluate", json=payload)
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "ok"
+
+
+def test_type_error_message_is_explicit():
+    payload = {
+        "sample_interval_ms": True,
+        "pressure": make_decay(1.5),
+        "limit_seconds": 1.0,
+    }
+    resp = client.post("/api/evaluate", json=payload)
+    assert resp.status_code == 422
+    assert "整数" in resp.text
 
 
 def test_health_endpoint():

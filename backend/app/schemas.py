@@ -3,15 +3,33 @@
 from __future__ import annotations
 
 import math
-from typing import Literal, Union
+from typing import Annotated, Literal, Union
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, BeforeValidator, Field, field_validator
+
+
+def _require_json_int(value: object) -> object:
+    """只接受 JSON 整数：布尔与字符串一律视为类型错误。"""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("sample_interval_ms 必须是整数，不接受布尔或字符串")
+    return value
+
+
+def _require_json_number(value: object) -> object:
+    """只接受 JSON 数字：布尔与字符串一律视为类型错误。"""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("必须是数字，不接受布尔或字符串")
+    return value
+
+
+StrictJsonInt = Annotated[int, BeforeValidator(_require_json_int)]
+StrictJsonNumber = Annotated[float, BeforeValidator(_require_json_number)]
 
 
 class EvaluateRequest(BaseModel):
-    sample_interval_ms: int = Field(ge=1, le=100)
-    pressure: list[float] = Field(min_length=200, max_length=20000)
-    limit_seconds: float = Field(ge=0.30, le=5.00)
+    sample_interval_ms: StrictJsonInt = Field(ge=1, le=100)
+    pressure: list[StrictJsonNumber] = Field(min_length=200, max_length=20000)
+    limit_seconds: StrictJsonNumber = Field(ge=0.30, le=5.00)
 
     @field_validator("pressure")
     @classmethod
