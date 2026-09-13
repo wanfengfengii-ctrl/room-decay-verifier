@@ -106,6 +106,49 @@ def test_common_limit_allows_items_to_omit_limit_seconds():
     }
 
 
+def test_common_limit_ignores_stale_invalid_item_limits():
+    """启用统一限值时，条目残留的无效旧限值不再判为字段错误，按全批限值正常复核。"""
+    rooms = [
+        {**valid_room("STALE-STR"), "limit_seconds": "去年填的"},
+        {**valid_room("STALE-RANGE"), "limit_seconds": 99.0},
+        {**valid_room("STALE-BOOL"), "limit_seconds": True},
+        {**valid_room("STALE-NULL"), "limit_seconds": None},
+        without_limit(valid_room("CLEAN")),
+    ]
+    resp = post_batch({"items": rooms, "common_limit_seconds": 1.0})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert [i["status"] for i in body["items"]] == ["ok"] * 5
+    assert [i["limit_seconds"] for i in body["items"]] == [1.0] * 5
+    assert body["summary"] == {
+        "total": 5,
+        "ok": 5,
+        "passed": 5,
+        "failed": 0,
+        "rejected": 0,
+        "invalid": 0,
+    }
+    # 与干净条目（省略限值）的响应逐字节一致：旧限值不留任何痕迹
+    clean = post_batch(
+        {"items": [without_limit(r) for r in rooms], "common_limit_seconds": 1.0}
+    )
+    assert resp.content == clean.content
+
+
+def test_stale_invalid_item_limits_still_error_without_common_limit():
+    """未启用统一限值时，同样的无效限值仍是该行字段错误（行为不回归）。"""
+    rooms = [
+        {**valid_room("STALE-STR"), "limit_seconds": "去年填的"},
+        {**valid_room("STALE-RANGE"), "limit_seconds": 99.0},
+        valid_room("OK"),
+    ]
+    body = post_batch({"items": rooms}).json()
+    assert [i["status"] for i in body["items"]] == ["invalid", "invalid", "ok"]
+    for item in body["items"][:2]:
+        assert any(e["field"] == "limit_seconds" for e in item["errors"])
+    assert body["summary"]["ok"] == 1 and body["summary"]["invalid"] == 2
+
+
 def test_top_level_common_limit_wins_when_item_also_has_limit():
     """两处同时存在限值时，明确以顶层统一限值为准。"""
     rooms = [valid_room("R-ITEM-LOW", limit_seconds=0.3)]  # 条目限值本会导致不合格

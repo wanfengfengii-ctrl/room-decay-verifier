@@ -252,6 +252,11 @@ async def evaluate_batch(request: Request) -> BatchEvaluateResponse:
             summary.invalid += 1
             continue
 
+        # 启用统一限值时，条目残留的旧限值（无论是否合法）整列忽略：
+        # 不参与校验、不参与计算，全批一律以顶层值为准。
+        if common_limit is not None:
+            raw = {k: v for k, v in raw.items() if k != "limit_seconds"}
+
         # 未启用统一限值时，条目缺少 limit_seconds 仍是该行的字段错误；
         # 显式 null 与缺省同等处理。
         limit_missing = common_limit is None and raw.get("limit_seconds") is None

@@ -396,6 +396,28 @@ def main() -> None:
         body,
     )
 
+    # 启用统一限值时，条目残留的无效旧限值被忽略，按全批限值正常复核
+    stale = [
+        {**omitted[0], "limit_seconds": "残留旧值"},
+        {**omitted[0], "room_id": "U-STALE-RANGE", "limit_seconds": 99.0},
+        {**omitted[0], "room_id": "U-STALE-BOOL", "limit_seconds": True},
+    ]
+    status, body = http(
+        "POST",
+        f"{API_URL}/api/evaluate-batch",
+        {"items": stale, "common_limit_seconds": 1.0},
+    )
+    stale_batch = json.loads(body)
+    check(
+        "残留无效旧限值的房间按全批限值正常复核",
+        status == 200
+        and [i["status"] for i in stale_batch["items"]] == ["ok", "ok", "ok"]
+        and [i["limit_seconds"] for i in stale_batch["items"]] == [1.0, 1.0, 1.0]
+        and stale_batch["summary"]["ok"] == 3
+        and stale_batch["summary"]["invalid"] == 0,
+        body,
+    )
+
     # 统一限值改变时，只改变有效房间的限值与判定
     status, low_body = http(
         "POST", f"{API_URL}/api/evaluate-batch", {"items": omitted, "common_limit_seconds": 0.3}

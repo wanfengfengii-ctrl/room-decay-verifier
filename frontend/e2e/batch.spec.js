@@ -92,6 +92,30 @@ test('统一限值：全批共用限值，逐行显示实际限值并更新汇�
   await expect(summary).toContainText('衰减异常 1 间、字段错误 1 间');
 });
 
+test('启用统一限值时残留无效旧限值的房间按全批限值正常复核', async ({ page }) => {
+  await gotoBatch(page);
+  await page.getByTestId('batch-input').fill(
+    JSON.stringify({
+      items: [
+        { ...okRoomNoLimit('STALE-STR'), limit_seconds: '去年填的' },
+        { ...okRoomNoLimit('STALE-RANGE'), limit_seconds: 99 },
+        okRoomNoLimit('CLEAN'),
+      ],
+    }),
+  );
+  await page.getByTestId('common-limit-toggle').check();
+  await page.getByTestId('common-limit-input').fill('1.0');
+  await page.getByTestId('batch-submit-btn').click();
+
+  // 残留旧限值不再判为字段错误，三行全部按统一限值正常复核
+  const rows = page.getByTestId('batch-row');
+  await expect(rows).toHaveCount(3);
+  await expect(page.getByTestId('row-status')).toHaveText(['正常', '正常', '正常']);
+  await expect(page.getByTestId('row-limit')).toHaveText(['1.000 s', '1.000 s', '1.000 s']);
+  await expect(page.getByTestId('row-verdict')).toHaveText(['合格', '合格', '合格']);
+  await expect(page.getByTestId('batch-summary')).toContainText('正常 3 间');
+});
+
 test('统一限值越界时整批拒绝，清空旧结果并保留当前输入供修正', async ({ page }) => {
   await gotoBatch(page);
   // 先提交一组合法批次，确认旧数据存在
