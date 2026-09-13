@@ -35,6 +35,32 @@ textarea {
   margin: 12px 0 24px;
 }
 
+/* ---------- 统一限值 ---------- */
+
+.common-limit {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  flex-wrap: wrap;
+  margin: 12px 0 4px;
+}
+
+.common-limit label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #374151;
+  font-size: 14px;
+}
+
+.common-limit-value input[type='number'] {
+  width: 110px;
+  padding: 6px 10px;
+  border: 1px solid #c9d2dc;
+  border-radius: 6px;
+  font-size: 14px;
+}
+
 button {
   border: 1px solid #2563eb;
   background: #2563eb;

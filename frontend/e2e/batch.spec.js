@@ -21,6 +21,14 @@ function okRoom(roomId, { limit = 1.0, t60 = 1.5 } = {}) {
   };
 }
 
+function okRoomNoLimit(roomId, { t60 = 1.5 } = {}) {
+  return {
+    room_id: roomId,
+    sample_interval_ms: 1,
+    pressure: decayPressure({ t60 }),
+  };
+}
+
 async function gotoBatch(page) {
   await page.goto('/');
   await page.getByTestId('mode-batch').click();
@@ -42,6 +50,94 @@ async function gotoSingleAndSubmit(page, payload) {
     points: await page.getByTestId('points-value').innerText(),
   };
 }
+
+test('统一限值：全批共用限值，逐行显示实际限值并更新汇总', async ({ page }) => {
+  const payload = {
+    items: [
+      okRoomNoLimit('U-PASS'), // T20 = 0.5，0.6 内合格
+      okRoomNoLimit('U-FAIL', { t60: 2.4 }), // T20 = 0.8，超 0.6 不合格
+      {
+        room_id: 'U-REJECTED',
+        sample_interval_ms: 1,
+        pressure: Array.from({ length: 1000 }, () => 5),
+      },
+      {
+        room_id: 'U-INVALID',
+        sample_interval_ms: 0,
+        pressure: decayPressure(),
+      },
+    ],
+  };
+
+  await gotoBatch(page);
+  await page.getByTestId('batch-input').fill(JSON.stringify(payload));
+  await page.getByTestId('common-limit-toggle').check();
+  await page.getByTestId('common-limit-input').fill('0.6');
+  await page.getByTestId('batch-submit-btn').click();
+
+  const rows = page.getByTestId('batch-row');
+  await expect(rows).toHaveCount(4);
+  // 衰减异常与字段错误仍留在原位置
+  await expect(page.getByTestId('row-status')).toHaveText(['正常', '正常', '衰减异常', '字段错误']);
+  // 正常行逐行显示实际采用的统一限值
+  await expect(page.getByTestId('row-limit')).toHaveText(['0.600 s', '0.600 s']);
+  await expect(page.getByTestId('row-verdict')).toHaveText(['合格', '不合格', '不计入', '不计入']);
+
+  // 合格汇总按统一限值更新
+  const summary = page.getByTestId('batch-summary');
+  await expect(summary).toContainText('共 4 间');
+  await expect(summary).toContainText('正常 2 间');
+  await expect(summary.locator('.pass')).toHaveText('1');
+  await expect(summary.locator('.fail')).toHaveText('1');
+  await expect(summary).toContainText('衰减异常 1 间、字段错误 1 间');
+});
+
+test('统一限值越界时整批拒绝，清空旧结果并保留当前输入供修正', async ({ page }) => {
+  await gotoBatch(page);
+  // 先提交一组合法批次，确认旧数据存在
+  await submitBatch(page, { items: [okRoom('OLD-1'), okRoom('OLD-2')] });
+  await expect(page.getByTestId('batch-row')).toHaveCount(2);
+
+  await page.getByTestId('common-limit-toggle').check();
+  await page.getByTestId('common-limit-input').fill('6.0');
+  await page.getByTestId('batch-submit-btn').click();
+
+  await expect(page.getByTestId('batch-error-panel')).toBeVisible();
+  await expect(page.getByTestId('batch-error-message')).toHaveText(
+    '统一限值必须是0.30至5.00的JSON数字',
+  );
+  await expect(page.getByTestId('batch-table')).toHaveCount(0);
+  await expect(page.getByTestId('batch-summary')).toHaveCount(0);
+  // 当前输入（批次内容与限值）保留供修正
+  await expect(page.getByTestId('common-limit-input')).toHaveValue('6.0');
+  await expect(page.getByTestId('batch-input')).not.toHaveValue('');
+});
+
+test('统一限值输入留空时本地提示同一条文案且不残留旧结果', async ({ page }) => {
+  await gotoBatch(page);
+  await submitBatch(page, { items: [okRoom('OLD-1')] });
+  await expect(page.getByTestId('batch-row')).toHaveCount(1);
+
+  await page.getByTestId('common-limit-toggle').check();
+  await page.getByTestId('batch-submit-btn').click();
+
+  await expect(page.getByTestId('batch-error-message')).toHaveText(
+    '统一限值必须是0.30至5.00的JSON数字',
+  );
+  await expect(page.getByTestId('batch-table')).toHaveCount(0);
+});
+
+test('未启用统一限值时缺少条目限值仍是该行字段错误', async ({ page }) => {
+  await gotoBatch(page);
+  await submitBatch(page, { items: [okRoom('OK-1'), okRoomNoLimit('NO-LIMIT')] });
+
+  const rows = page.getByTestId('batch-row');
+  await expect(rows).toHaveCount(2);
+  await expect(rows.nth(0)).toHaveClass(/row-ok/);
+  await expect(rows.nth(1)).toHaveClass(/row-invalid/);
+  await expect(rows.nth(1).getByTestId('row-errors')).toContainText('limit_seconds');
+  await expect(rows.nth(1).getByTestId('row-errors')).toContainText('字段缺失');
+});
 
 test('混合批次按文件顺序展示三类行且只汇总正常结论', async ({ page }) => {
   const payload = {

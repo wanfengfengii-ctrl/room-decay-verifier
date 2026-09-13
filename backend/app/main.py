@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import math
+from typing import Optional
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -24,7 +26,7 @@ from .schemas import (
 )
 from .t20 import evaluate_t20
 
-app = FastAPI(title="T20 混响复核台", version="1.1.0")
+app = FastAPI(title="T20 混响复核台", version="1.2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -35,6 +37,11 @@ app.add_middleware(
 
 BATCH_MIN_ITEMS = 1
 BATCH_MAX_ITEMS = 20
+
+# 统一限值：与条目级 limit_seconds 同一验收口径
+COMMON_LIMIT_MIN = 0.30
+COMMON_LIMIT_MAX = 5.00
+COMMON_LIMIT_ERROR_MESSAGE = "统一限值必须是0.30至5.00的JSON数字"
 
 
 class BatchRequestError(Exception):
@@ -55,12 +62,20 @@ def health() -> dict:
     return {"status": "up"}
 
 
-def _run_evaluation(payload: EvaluateRequest) -> EvaluateResponse:
-    """单次复核的唯一计算出口：批量接口也复用这里，不改写任何公式。"""
+def _run_evaluation(
+    sample_interval_ms: int,
+    pressure: list[float],
+    limit_seconds: float,
+) -> EvaluateResponse:
+    """单次复核的唯一计算出口：批量接口也复用这里，不改写任何公式。
+
+    limit_seconds 为该行实际采用的限值（批量场景下可能来自顶层统一限值），
+    既参与合格判定，也原样回显在证据字段中。
+    """
     result = evaluate_t20(
-        sample_interval_ms=payload.sample_interval_ms,
-        pressure=payload.pressure,
-        limit_seconds=payload.limit_seconds,
+        sample_interval_ms=sample_interval_ms,
+        pressure=pressure,
+        limit_seconds=limit_seconds,
     )
     if not result.accepted:
         return EvaluateRejected(reason=result.reason or "未知拒绝原因")
@@ -70,14 +85,18 @@ def _run_evaluation(payload: EvaluateRequest) -> EvaluateResponse:
         slope=result.slope,
         background=result.background,
         peak_index=result.peak_index,
-        limit_seconds=payload.limit_seconds,
+        limit_seconds=limit_seconds,
         passed=result.passed,
     )
 
 
 @app.post("/api/evaluate", response_model=EvaluateResponse)
 def evaluate(payload: EvaluateRequest) -> EvaluateResponse:
-    return _run_evaluation(payload)
+    return _run_evaluation(
+        sample_interval_ms=payload.sample_interval_ms,
+        pressure=payload.pressure,
+        limit_seconds=payload.limit_seconds,
+    )
 
 
 # ---------- 批量复核 ----------
@@ -160,6 +179,25 @@ def _item_field_errors(exc: ValidationError) -> list[BatchFieldError]:
     return errors
 
 
+def _parse_common_limit(body: dict) -> Optional[float]:
+    """解析顶层可选统一限值 common_limit_seconds。
+
+    缺省（或显式 null）视为未启用，返回 None；一旦提供，必须是
+    0.30 至 5.00 的有限 JSON 数字，否则整批 400，不产生任何逐项结论。
+    """
+    if "common_limit_seconds" not in body or body["common_limit_seconds"] is None:
+        return None
+    value = body["common_limit_seconds"]
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or not (COMMON_LIMIT_MIN <= value <= COMMON_LIMIT_MAX)
+    ):
+        raise BatchRequestError(COMMON_LIMIT_ERROR_MESSAGE)
+    return float(value)
+
+
 @app.post("/api/evaluate-batch", response_model=BatchEvaluateResponse)
 async def evaluate_batch(request: Request) -> BatchEvaluateResponse:
     # 手动解析：整批无法解析属于请求级错误，不能下沉为逐项错误。
@@ -170,6 +208,9 @@ async def evaluate_batch(request: Request) -> BatchEvaluateResponse:
 
     if not isinstance(body, dict) or not isinstance(body.get("items"), list):
         raise BatchRequestError('请求体必须是包含 "items" 数组的 JSON 对象')
+
+    # 统一限值是请求级字段：非法即整批拒绝，先于任何逐项校验。
+    common_limit = _parse_common_limit(body)
 
     raw_items = body["items"]
     if not (BATCH_MIN_ITEMS <= len(raw_items) <= BATCH_MAX_ITEMS):
@@ -211,21 +252,45 @@ async def evaluate_batch(request: Request) -> BatchEvaluateResponse:
             summary.invalid += 1
             continue
 
+        # 未启用统一限值时，条目缺少 limit_seconds 仍是该行的字段错误；
+        # 显式 null 与缺省同等处理。
+        limit_missing = common_limit is None and raw.get("limit_seconds") is None
+
         try:
             item = BatchEvaluateItem.model_validate(raw)
         except ValidationError as exc:
             room_id = raw.get("room_id")
+            errors = _item_field_errors(exc)
+            if limit_missing:
+                errors.append(BatchFieldError(field="limit_seconds", message="字段缺失"))
             items.append(
                 BatchItemInvalid(
                     index=index,
                     room_id=room_id if isinstance(room_id, str) else None,
-                    errors=_item_field_errors(exc),
+                    errors=errors,
                 )
             )
             summary.invalid += 1
             continue
 
-        outcome = _run_evaluation(item)
+        if limit_missing:
+            items.append(
+                BatchItemInvalid(
+                    index=index,
+                    room_id=item.room_id,
+                    errors=[BatchFieldError(field="limit_seconds", message="字段缺失")],
+                )
+            )
+            summary.invalid += 1
+            continue
+
+        # 条目与顶层同时给出限值时，以顶层统一限值为准
+        effective_limit = common_limit if common_limit is not None else item.limit_seconds
+        outcome = _run_evaluation(
+            sample_interval_ms=item.sample_interval_ms,
+            pressure=item.pressure,
+            limit_seconds=effective_limit,
+        )
         if isinstance(outcome, EvaluateSuccess):
             items.append(BatchItemSuccess(room_id=item.room_id, **outcome.model_dump()))
             summary.ok += 1

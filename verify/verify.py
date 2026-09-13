@@ -343,6 +343,158 @@ def main() -> None:
         json.dumps(locate["summary"], ensure_ascii=False),
     )
 
+    # 5e. 统一限值：同一批采样分别提交逐房间限值与等值统一限值，结论逐字节一致
+    uniform_rooms = [
+        {
+            "room_id": "U-OK",
+            "sample_interval_ms": 1,
+            "pressure": make_decay(1.5),
+            "limit_seconds": 1.0,
+        },
+        {
+            "room_id": "U-REJECTED",
+            "sample_interval_ms": 1,
+            "pressure": [5.0] * 1000,
+            "limit_seconds": 1.0,
+        },
+        {
+            "room_id": "U-INVALID",
+            "sample_interval_ms": 0,
+            "pressure": make_decay(1.5),
+            "limit_seconds": 1.0,
+        },
+    ]
+    status, per_room_body = http("POST", f"{API_URL}/api/evaluate-batch", {"items": uniform_rooms})
+    check("逐房间限值批次返回 200", status == 200, per_room_body)
+
+    omitted = [{k: v for k, v in r.items() if k != "limit_seconds"} for r in uniform_rooms]
+    status, common_body = http(
+        "POST",
+        f"{API_URL}/api/evaluate-batch",
+        {"items": omitted, "common_limit_seconds": 1.0},
+    )
+    check("等值统一限值批次返回 200", status == 200, common_body)
+    check(
+        "统一限值与逐房间限值的逐行证据、顺序与汇总一致",
+        common_body == per_room_body,
+        f"common={common_body} per-room={per_room_body}",
+    )
+
+    # 两处同时存在限值时以顶层统一限值为准
+    both = [dict(r, limit_seconds=0.3) for r in uniform_rooms]
+    status, body = http(
+        "POST",
+        f"{API_URL}/api/evaluate-batch",
+        {"items": both, "common_limit_seconds": 1.0},
+    )
+    both_batch = json.loads(body)
+    check(
+        "条目与顶层同时给出限值时以顶层值为准",
+        status == 200
+        and both_batch["items"][0]["limit_seconds"] == 1.0
+        and both_batch["items"][0]["passed"] is True,
+        body,
+    )
+
+    # 统一限值改变时，只改变有效房间的限值与判定
+    status, low_body = http(
+        "POST", f"{API_URL}/api/evaluate-batch", {"items": omitted, "common_limit_seconds": 0.3}
+    )
+    status, high_body = http(
+        "POST", f"{API_URL}/api/evaluate-batch", {"items": omitted, "common_limit_seconds": 5.0}
+    )
+    low, high = json.loads(low_body), json.loads(high_body)
+    ok_low, ok_high = low["items"][0], high["items"][0]
+    check(
+        "统一限值改变只更新有效房间的限值与判定",
+        ok_low["limit_seconds"] == 0.3
+        and ok_low["passed"] is False
+        and ok_high["limit_seconds"] == 5.0
+        and ok_high["passed"] is True
+        and ok_low["t20_seconds"] == ok_high["t20_seconds"]
+        and ok_low["slope"] == ok_high["slope"]
+        and ok_low["points_used"] == ok_high["points_used"],
+        f"low={ok_low} high={ok_high}",
+    )
+    check(
+        "衰减异常与字段错误行不随统一限值改变",
+        low["items"][1] == high["items"][1] and low["items"][2] == high["items"][2],
+        f"low={low['items']} high={high['items']}",
+    )
+    check(
+        "合格汇总随统一限值更新",
+        low["summary"] == {"total": 3, "ok": 1, "passed": 0, "failed": 1, "rejected": 1, "invalid": 1}
+        and high["summary"] == {"total": 3, "ok": 1, "passed": 1, "failed": 0, "rejected": 1, "invalid": 1},
+        f"low={low['summary']} high={high['summary']}",
+    )
+
+    # 非法统一限值：字符串 / 布尔 / 越界一律整批 400，消息固定
+    for bad in ("1.0", True, 0.29, 5.01):
+        status, body = http(
+            "POST",
+            f"{API_URL}/api/evaluate-batch",
+            {"items": [uniform_rooms[0]], "common_limit_seconds": bad},
+        )
+        check(
+            f"非法统一限值 {bad!r} 整批 400",
+            status == 400 and "统一限值必须是0.30至5.00的JSON数字" in body,
+            f"got {status}: {body}",
+        )
+    # 非有限数（NaN / Infinity）以原始字节提交
+    room_json = json.dumps(uniform_rooms[0]).encode()
+    for token in (b"NaN", b"Infinity"):
+        req = urllib.request.Request(
+            f"{API_URL}/api/evaluate-batch",
+            data=b'{"items": [' + room_json + b'], "common_limit_seconds": ' + token + b"}",
+            method="POST",
+        )
+        req.add_header("Content-Type", "application/json")
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                nf_status, nf_body = resp.status, resp.read().decode()
+        except urllib.error.HTTPError as exc:
+            nf_status, nf_body = exc.code, exc.read().decode()
+        check(
+            f"非有限统一限值 {token.decode()} 整批 400",
+            nf_status == 400 and "统一限值必须是0.30至5.00的JSON数字" in nf_body,
+            f"got {nf_status}: {nf_body}",
+        )
+
+    # 未启用统一限值时，缺少条目限值仍是该行字段错误，不遮蔽其余房间
+    status, body = http(
+        "POST",
+        f"{API_URL}/api/evaluate-batch",
+        {"items": [uniform_rooms[0], {**omitted[0], "room_id": "U-NO-LIMIT"}]},
+    )
+    no_common = json.loads(body)
+    missing_item = no_common["items"][1]
+    check(
+        "未启用统一限值时缺少条目限值按该行字段错误处理",
+        status == 200
+        and no_common["items"][0]["status"] == "ok"
+        and missing_item["status"] == "invalid"
+        and missing_item["index"] == 1
+        and any(
+            e.get("field") == "limit_seconds" and e.get("message")
+            for e in missing_item["errors"]
+        ),
+        json.dumps(no_common, ensure_ascii=False),
+    )
+
+    # 经 Web 反代的统一限值链路同样可用
+    status, body = http(
+        "POST",
+        f"{WEB_URL}/api/evaluate-batch",
+        {"items": omitted, "common_limit_seconds": 1.0},
+    )
+    check("经 Web 反代统一限值结论一致", status == 200 and body == per_room_body, body)
+    status, body = http(
+        "POST",
+        f"{WEB_URL}/api/evaluate-batch",
+        {"items": omitted, "common_limit_seconds": 9.9},
+    )
+    check("经 Web 反代非法统一限值同样整批 400", status == 400, f"got {status}")
+
     # 经 Web 反代的批量链路可用，结论一致
     status, body = http("POST", f"{WEB_URL}/api/evaluate-batch", {"items": [rooms[0]]})
     proxied = json.loads(body)

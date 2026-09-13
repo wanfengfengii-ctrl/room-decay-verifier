@@ -75,9 +75,14 @@ class BatchEvaluateItem(EvaluateRequest):
 
     room_id 只要求是非空非空白字符串，不设长度上限：
     超长标识照常复核并返回该房间结论，而不是判为字段错误。
+
+    limit_seconds 在此放宽为可缺省：请求顶层提供 common_limit_seconds 时
+    条目可省略限值（统一限值优先）；未提供统一限值时，缺省仍由批量入口
+    补判为该行的字段错误。条目若显式给出限值，仍按原口径严格校验。
     """
 
     room_id: StrictJsonStr = Field(min_length=1)
+    limit_seconds: Optional[StrictJsonNumber] = Field(default=None, ge=0.30, le=5.00)
 
     @field_validator("room_id")
     @classmethod
